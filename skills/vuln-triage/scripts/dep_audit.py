@@ -377,7 +377,7 @@ def osv_online(deps: List[Dict[str, object]], timeout: float, max_vulns: int) ->
         body = json.dumps({"queries": [{"package": {"name": d["name"], "ecosystem": d["ecosystem"]},
                                         "version": d["version"]} for _, d in chunk]}).encode()
         req = urllib.request.Request(OSV_BATCH, data=body, headers={"Content-Type": "application/json",
-                                                                    "User-Agent": "aegis-dep-audit/1.0"})
+                                                                    "User-Agent": "claude-security-skills-dep-audit/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             results = json.load(resp).get("results", [])
         for (i, _), res in zip(chunk, results):

@@ -5,7 +5,7 @@ Line-based rules, each with a CWE id and a concrete fix. Fast, offline, no
 dependencies. It finds candidates for review, not proven bugs: a human (or the
 reviewing agent) confirms whether untrusted input reaches each one.
 
-Suppress a reviewed line with an inline `aegis:ignore` comment.
+Suppress a reviewed line with an inline `secskills:ignore` comment.
 
 Usage:
   sast_lite.py .
@@ -32,7 +32,7 @@ LANG_EXT = {
     "go": (".go",),
 }
 COMMENT_PREFIX = {"py": ("#",), "js": ("//", "/*", "*"), "php": ("//", "#", "/*", "*"), "go": ("//", "/*", "*")}
-INLINE_IGNORE = "aegis:ignore"
+INLINE_IGNORE = "secskills:ignore"
 SQL = r"(?:SELECT\s.+\sFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)"
 
 
@@ -165,7 +165,7 @@ def snippet(line: str, limit: int = 120) -> str:
 
 
 def scan_text(text: str, lang: str, rel: str = "<input>", langs: Optional[Iterable[str]] = None) -> List[Dict[str, str]]:
-    """Run every rule for `lang` over the text. Comment-only lines and aegis:ignore lines are skipped."""
+    """Run every rule for `lang` over the text. Comment-only lines and secskills:ignore lines are skipped."""
     out: List[Dict[str, str]] = []
     rules = [r for r in RULES if r["lang"] == lang]
     prefixes = COMMENT_PREFIX[lang]

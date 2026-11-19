@@ -1,4 +1,4 @@
-// Fake Go service for the Aegis examples.
+// Fake Go service for the Claude Security Skills examples.
 package main
 
 import (

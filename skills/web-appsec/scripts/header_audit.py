@@ -56,7 +56,7 @@ def fetch_headers(url: str, timeout: float = 10.0, insecure: bool = False) -> Tu
     if insecure:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers={"User-Agent": "aegis-header-audit/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "claude-security-skills-header-audit/1.0"})
     try:
         resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
     except urllib.error.HTTPError as err:  # 4xx/5xx still carry headers worth grading

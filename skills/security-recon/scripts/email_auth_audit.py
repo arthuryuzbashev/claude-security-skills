@@ -479,7 +479,7 @@ def collect_live(domain: str, selectors: List[str], lookup: Resolver) -> Dict[st
 def fetch_sts_policy(domain: str, timeout: float) -> Optional[str]:
     url = f"https://mta-sts.{domain}/.well-known/mta-sts.txt"
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "aegis-email-auth/1.0"}),
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "claude-security-skills-email-auth/1.0"}),
                                     timeout=timeout) as resp:
             return resp.read(65536).decode("utf-8", "replace")
     except (urllib.error.URLError, OSError, ValueError):

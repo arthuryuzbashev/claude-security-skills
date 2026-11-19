@@ -1,4 +1,4 @@
-# Aegis skill standard
+# Skill standard
 
 Every skill in this repo follows the same contract, so people can trust any of them the same way.
 `python3 tools/validate.py` enforces the parts a machine can check.

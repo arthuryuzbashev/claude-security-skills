@@ -33,7 +33,7 @@ SOURCE_NAMES = {"Dockerfile", "Makefile", ".env", "Jenkinsfile", "Procfile"}
 SKIP_DIRS = {".git", "node_modules", "vendor", "venv", ".venv", "dist", "build", "__pycache__", ".tox",
              "target", "Pods", ".gradle", ".idea", ".next", "coverage"}
 MAX_FILE_BYTES = 2_000_000
-SUPPRESS = "aegis-ignore"
+SUPPRESS = "secskills-ignore"
 
 
 def finding(fid, severity, title, detail, fix, location=None, evidence=None):

@@ -2,7 +2,7 @@ title: Scheduled Task Created From a User-Writable Path
 id: b78bcfc4-227d-4c3e-8c0a-77d6beb2a51a
 status: experimental
 description: Detects schtasks.exe /create where the task runs something from a user-writable folder (AppData, Temp, Public, ProgramData), a common persistence pattern.
-author: Aegis example
+author: Claude Security Skills example
 date: 2026-11-19
 tags:
   - attack.persistence

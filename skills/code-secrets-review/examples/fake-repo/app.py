@@ -1,4 +1,4 @@
-"""Fake Flask-style app for the Aegis code-secrets-review examples. Every key here is fake."""
+"""Fake Flask-style app for the Claude Security Skills code-secrets-review examples. Every key here is fake."""
 import hashlib
 import os
 import pickle
@@ -11,7 +11,7 @@ AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
 AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 DATABASE_URL = "postgres://app:Zq9fakePassw0rd@db.example.test:5432/app"
 api_token = "f4k3T0k3nQ9vL2mX8pR7sW1yZ6bN3cJ5"
-LEGACY_TOKEN = "Hb7fakeLegacyT0kenX2pQ9rS4vW6yZ1"  # aegis:ignore (reviewed: revoked fake)
+LEGACY_TOKEN = "Hb7fakeLegacyT0kenX2pQ9rS4vW6yZ1"  # secskills:ignore (reviewed: revoked fake)
 DEBUG = True
 
 

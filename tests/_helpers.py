@@ -19,7 +19,7 @@ def skill_path(skill: str, *parts: str) -> Path:
 def load_script(skill: str, script: str):
     """Import skills/<skill>/scripts/<script>.py as a module."""
     path = skill_path(skill, "scripts", f"{script}.py")
-    name = f"aegis_{skill.replace('-', '_')}_{script}"
+    name = f"secskills_{skill.replace('-', '_')}_{script}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

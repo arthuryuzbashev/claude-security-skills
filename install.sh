@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Install Aegis skills into Claude Code.
+# Install Claude Security Skills into Claude Code.
 #
 #   ./install.sh                     copy every skill to ~/.claude/skills (all projects)
 #   ./install.sh --link              symlink instead, so `git pull` updates them
 #   ./install.sh --project ./myapp   install into one project's .claude/skills
 #   ./install.sh web-appsec vuln-triage   only these skills
-#   ./install.sh --uninstall         remove Aegis skills from the target
+#   ./install.sh --uninstall         remove these skills from the target
 #   ./install.sh --list              show available skills
 set -euo pipefail
 

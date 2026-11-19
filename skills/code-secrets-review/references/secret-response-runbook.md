@@ -51,8 +51,8 @@ Write down: secret type, location, exposure window, scopes, evidence of use, rot
 
 | Hit | Usual call |
 |---|---|
-| Value contains EXAMPLE, dummy, changeme or a placeholder | False positive, add `aegis:ignore` with a note |
-| Test fixture with a made-up value | Add the path to `.aegis-secrets-ignore` |
+| Value contains EXAMPLE, dummy, changeme or a placeholder | False positive, add `secskills:ignore` with a note |
+| Test fixture with a made-up value | Add the path to `.secskills-ignore` |
 | Stripe test key (`sk_test_`) | Low, but rotate: it exposes test data and habits leak live keys next |
 | High-entropy value under a secret-like name | Check with the owner; if real, treat as a leak |
 | Private key block | Critical unless the file is a documented test vector |

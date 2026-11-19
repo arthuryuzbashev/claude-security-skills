@@ -5,8 +5,8 @@ Walks a directory (skips .git, node_modules, virtualenvs, binaries and big files
 applies provider-specific patterns plus an entropy check on secret-looking
 assignments, and prints every match masked to its first 4 characters.
 
-Suppress a line with an inline `aegis:ignore` comment. Suppress paths or rules
-with a `.aegis-secrets-ignore` file at the scan root:
+Suppress a line with an inline `secskills:ignore` comment. Suppress paths or rules
+with a `.secskills-ignore` file at the scan root:
   tests/fixtures/*          ignore every rule under that path
   SEC-008:docs/*            ignore one rule under that path
 
@@ -33,8 +33,8 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "ven
 SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z",
             ".jar", ".war", ".class", ".so", ".dylib", ".dll", ".exe", ".bin", ".woff", ".woff2", ".ttf", ".otf",
             ".mp3", ".mp4", ".mov", ".lock", ".min.js", ".map", ".pyc", ".sqlite", ".db"}
-IGNORE_FILE = ".aegis-secrets-ignore"
-INLINE_IGNORE = "aegis:ignore"
+IGNORE_FILE = ".secskills-ignore"
+INLINE_IGNORE = "secskills:ignore"
 PLACEHOLDER = re.compile(r"(?i)(example|sample|dummy|placeholder|changeme|change_me|your[_-]|xxxx|\*\*\*\*|<[^>]+>|"
                          r"\$\{|\{\{|%\(|process\.env|os\.environ|getenv|redacted|todo|fixme|test(ing)?_?(key|secret|token)?$|"
                          r"^(password|secret|token|none|null|true|false)$)")
@@ -113,7 +113,7 @@ def is_placeholder(value: str) -> bool:
 
 
 def load_ignore(root: str) -> List[Tuple[Optional[str], str]]:
-    """Parse .aegis-secrets-ignore into (rule or None, glob) pairs."""
+    """Parse .secskills-ignore into (rule or None, glob) pairs."""
     path = os.path.join(root, IGNORE_FILE) if os.path.isdir(root) else os.path.join(os.path.dirname(root) or ".", IGNORE_FILE)
     rules: List[Tuple[Optional[str], str]] = []
     if not os.path.isfile(path):

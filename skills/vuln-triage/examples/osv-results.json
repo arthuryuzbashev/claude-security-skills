@@ -1,5 +1,5 @@
 {
-  "_comment": "FAKE advisories for the Aegis example. Ids, CVEs and ranges are made up; real data comes from api.osv.dev",
+  "_comment": "FAKE advisories for the Claude Security Skills example. Ids, CVEs and ranges are made up; real data comes from api.osv.dev",
   "vulns": [
     {
       "id": "EXAMPLE-PY-0001",

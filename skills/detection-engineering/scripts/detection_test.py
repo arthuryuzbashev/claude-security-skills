@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 
 # The YAML reader lives in the sibling sigma_lint.py (same skill), loaded by path.
 _spec = importlib.util.spec_from_file_location(
-    "_aegis_sigma_lint", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sigma_lint.py"))
+    "_secskills_sigma_lint", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sigma_lint.py"))
 _lint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_lint)
 YamlError, collect_files, load_rules = _lint.YamlError, _lint.collect_files, _lint.load_rules

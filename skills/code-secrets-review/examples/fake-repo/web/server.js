@@ -1,4 +1,4 @@
-// Fake Express server for the Aegis examples. Nothing here is real.
+// Fake Express server for the Claude Security Skills examples. Nothing here is real.
 const { exec, execFile } = require("child_process");
 const crypto = require("crypto");
 

@@ -2,7 +2,7 @@ title: LSASS Memory Dump With comsvcs.dll or ProcDump
 id: b3d3e21e-67ea-4df4-8a99-6af371bcc50d
 status: test
 description: Detects the comsvcs.dll MiniDump export run through rundll32 and ProcDump pointed at lsass, two common ways to dump credentials from LSASS memory.
-author: Aegis example
+author: Claude Security Skills example
 date: 2026-11-19
 tags:
   - attack.credential-access

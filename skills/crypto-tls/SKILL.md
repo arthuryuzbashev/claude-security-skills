@@ -53,7 +53,7 @@ JSON keys: `target`, `mode` (live/file), `chain_length`, `connection` (protocol,
 
 ### crypto_review.py
 
-Scans source and config files (common extensions; `--all-files` for everything non-binary). Skips `node_modules`, `.git`, `vendor`, build dirs. A line containing `aegis-ignore` is skipped.
+Scans source and config files (common extensions; `--all-files` for everything non-binary). Skips `node_modules`, `.git`, `vendor`, build dirs. A line containing `secskills-ignore` is skipped.
 
 ```bash
 python3 scripts/crypto_review.py src/

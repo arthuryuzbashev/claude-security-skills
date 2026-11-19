@@ -1,15 +1,15 @@
 {
-  "name": "aegis-skills",
+  "name": "claude-security-skills",
   "owner": { "name": "Arthur Yuzbashev" },
   "metadata": {
-    "description": "Aegis: tested, stdlib-only security skills for Claude Code",
+    "description": "Tested, stdlib-only security skills for Claude Code",
     "version": "1.0.0"
   },
   "plugins": [
     {
-      "name": "aegis",
+      "name": "security",
       "source": "./",
-      "description": "All Aegis security skills in one plugin",
+      "description": "All 19 security skills in one plugin",
       "version": "1.0.0",
       "license": "MIT",
       "keywords": ["security", "appsec", "devsecops", "blue-team", "dfir"]

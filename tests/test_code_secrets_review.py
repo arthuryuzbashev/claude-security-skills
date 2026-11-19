@@ -69,7 +69,7 @@ class SecretRuleTests(unittest.TestCase):
         self.assertEqual(sec.mask("abcdefgh"), "abcd...")
 
     def test_inline_ignore(self):
-        self.assertEqual(self.scan('client_secret = "Xr8fakeS3cretQw4Zp7Lm2"  # aegis:ignore'), [])
+        self.assertEqual(self.scan('client_secret = "Xr8fakeS3cretQw4Zp7Lm2"  # secskills:ignore'), [])
 
     def test_entropy_function(self):
         self.assertEqual(sec.shannon_entropy("aaaa"), 0.0)
@@ -85,7 +85,7 @@ class SecretScanRepoTests(unittest.TestCase):
         self.assertFalse(any(l.startswith("tests/fixtures") for l in locs), "allowlist file honoured")
         self.assertFalse(any(l.startswith("clean/") for l in locs), "clean file stays clean")
         self.assertNotIn("config/.env.example", locs)
-        self.assertNotIn("app.py:14", locs, "inline aegis:ignore honoured")
+        self.assertNotIn("app.py:14", locs, "inline secskills:ignore honoured")
 
     def test_rule_scoped_ignore_and_skips(self):
         tmp = tempfile.mkdtemp()
@@ -98,7 +98,7 @@ class SecretScanRepoTests(unittest.TestCase):
                     fh.write(line)
             with open(os.path.join(tmp, "blob.dat"), "wb") as fh:
                 fh.write(b"\0\0" + line.encode())
-            with open(os.path.join(tmp, ".aegis-secrets-ignore"), "w") as fh:
+            with open(os.path.join(tmp, ".secskills-ignore"), "w") as fh:
                 fh.write("SEC-020:docs/*\n")
             findings, _ = sec.scan_path(tmp)
             self.assertEqual([f["location"] for f in findings], ["c.py:1"])
@@ -114,7 +114,7 @@ class SecretScanRepoTests(unittest.TestCase):
             self.assertTrue({"id", "severity", "title", "detail", "fix"} <= set(f))
         self.assertEqual(call_main(sec, [REPO, "--fail-on", "never"])[0], 0)
         self.assertEqual(call_main(sec, [os.path.join(REPO, "clean")])[0], 0)
-        self.assertEqual(call_main(sec, ["/nonexistent/aegis"])[0], 2)
+        self.assertEqual(call_main(sec, ["/nonexistent/secskills"])[0], 2)
 
     def test_stdin(self):
         code, out, _ = call_main(sec, ["--stdin", "--json"], stdin="+ token = " + fake("gh" + "p_", BODY36) + "\n")
@@ -161,7 +161,7 @@ class SastTests(unittest.TestCase):
     NEGATIVE = {
         "py": ["x = ast.literal_eval(s)", "subprocess.run(['ls', p])", "cfg = yaml.safe_load(t)",
                "cfg = yaml.load(t, Loader=yaml.SafeLoader)", "cur.execute(\"SELECT * FROM t WHERE id = %s\", (uid,))",
-               "h = hashlib.md5(data, usedforsecurity=False)", "# eval(x) in a comment", "x = eval(user)  # aegis:ignore",
+               "h = hashlib.md5(data, usedforsecurity=False)", "# eval(x) in a comment", "x = eval(user)  # secskills:ignore",
                "h = hashlib.sha256(data)"],
         "js": ["el.textContent = msg;", "execFile('ls', [p]);", "db.query('SELECT * FROM t WHERE id = $1', [id]);",
                "// el.innerHTML = x", "crypto.createHash('sha256')", "if (el.innerHTML === '') {}"],
@@ -206,7 +206,7 @@ class SastTests(unittest.TestCase):
         self.assertEqual(call_main(sast, [REPO, "--fail-on", "never"])[0], 0)
         self.assertEqual(call_main(sast, [os.path.join(REPO, "clean")])[0], 0)
         self.assertEqual(call_main(sast, [REPO, "--lang", "cobol"])[0], 2)
-        self.assertEqual(call_main(sast, ["/nonexistent/aegis"])[0], 2)
+        self.assertEqual(call_main(sast, ["/nonexistent/secskills"])[0], 2)
         code, out, _ = call_main(sast, [REPO, "--lang", "go", "--json"])
         self.assertEqual({f["language"] for f in json.loads(out)["findings"]}, {"go"})
         code, out, _ = call_main(sast, ["--list-rules", "--json"])

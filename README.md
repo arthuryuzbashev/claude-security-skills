@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Aegis: security skills for Claude Code" width="100%">
+  <img src="assets/banner.svg" alt="Claude Security Skills" width="100%">
 </p>
 
 <p align="center">
@@ -15,32 +15,46 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-64748b">
 </p>
 
----
+<p align="center">
+  <img src="assets/demo.svg" alt="Claude audits a risky .claude/settings.json with Claude Security Skills and returns findings with fixes" width="100%">
+</p>
 
-## Why Aegis
+## How it works
 
-Most "security prompts" are a wall of advice. Aegis skills come with real tools Claude runs for you, so answers are based on your actual files, not guesses.
+```mermaid
+flowchart LR
+    A["You ask in plain words<br/><i>is my CI safe?</i>"] --> B["Claude picks<br/>the matching skill"]
+    B --> C["Runs its tool on<br/>your real files"]
+    C --> D["Findings with severity,<br/>rule id and a fix"]
+    D --> E["Claude explains and<br/>can patch it for you"]
+```
+
+No setup per project and no commands to remember. Install once, then just talk to Claude.
+
+## Why these skills
+
+Most "security prompts" are a wall of advice. These skills come with real tools Claude runs for you, so answers are based on your actual files, not guesses.
 
 - **Tools, not just text.** Every skill ships Python scripts that parse your configs, logs, certificates, manifests and pipelines and return findings with a severity, a rule id and a fix you can paste
 - **Nothing to install.** Python standard library only. If you have `python3`, it works. No pip, no Docker, no API keys
 - **Safe by default.** Read-only. No exploit payloads, no cracking, no evasion. Live checks only touch targets you name, with timeouts
 - **Works offline and in CI.** Every tool runs on saved files, prints `--json`, and exits `1` when it finds something at or above `--fail-on`, so you can gate a pipeline on it
-- **Tested.** 568 unit tests on Python 3.9 to 3.15, macOS and Linux, plus a validator that checks every skill against [one standard](docs/SKILL_STANDARD.md)
+- **Tested.** 568 unit tests, run in CI on macOS and Linux with Python 3.9 to 3.13, plus a validator that checks every skill against [one standard](docs/SKILL_STANDARD.md)
 
 ## Install
 
 **As a Claude Code plugin** (easiest, updates with one command):
 
 ```
-/plugin marketplace add arthuryuzbashev/aegis-skills
-/plugin install aegis@aegis-skills
+/plugin marketplace add arthuryuzbashev/claude-security-skills
+/plugin install security@claude-security-skills
 ```
 
 **Or with the install script:**
 
 ```bash
-git clone https://github.com/arthuryuzbashev/aegis-skills.git
-cd aegis-skills
+git clone https://github.com/arthuryuzbashev/claude-security-skills.git
+cd claude-security-skills
 ./install.sh                 # every skill, for all your projects (~/.claude/skills)
 ./install.sh --link          # symlink instead, so `git pull` updates them
 ./install.sh web-appsec cloud-iac   # just the ones you want
@@ -135,9 +149,9 @@ Every tool follows the same rules: findings carry an `id`, `severity`, `title`, 
 
 ```yaml
 - name: Workflow security
-  run: python3 aegis-skills/skills/supply-chain/scripts/ci_audit.py .github/workflows --fail-on high
+  run: python3 claude-security-skills/skills/supply-chain/scripts/ci_audit.py .github/workflows --fail-on high
 - name: Leaked secrets
-  run: python3 aegis-skills/skills/code-secrets-review/scripts/secret_scan.py . --fail-on high
+  run: python3 claude-security-skills/skills/code-secrets-review/scripts/secret_scan.py . --fail-on high
 ```
 
 ## Development
@@ -152,7 +166,7 @@ New skills and checks are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Responsible use
 
-Aegis is for defenders, builders and authorized testers. Point live checks only at systems you own or have written permission to test. The tools are read-only and never exploit anything, but findings describe weak spots, so treat reports as sensitive. See [SECURITY.md](SECURITY.md).
+Claude Security Skills is for defenders, builders and authorized testers. Point live checks only at systems you own or have written permission to test. The tools are read-only and never exploit anything, but findings describe weak spots, so treat reports as sensitive. See [SECURITY.md](SECURITY.md).
 
 Pattern-based tools miss things and flag things. A clean run lowers risk, it does not prove safety.
 

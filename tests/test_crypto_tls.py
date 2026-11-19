@@ -202,7 +202,7 @@ class CryptoReviewTests(unittest.TestCase):
         self.assertIn("Supe...", found[0]["evidence"])
 
     def test_suppression_comment(self):
-        self.assertEqual(cr.scan_text("requests.get(u, verify=False)  # aegis-ignore: test fixture"), [])
+        self.assertEqual(cr.scan_text("requests.get(u, verify=False)  # secskills-ignore: test fixture"), [])
 
     def test_examples(self):
         res = cr.scan_paths([str(EX / "weak_app")])

@@ -246,7 +246,7 @@ class LinuxCliTests(unittest.TestCase):
         self.assertIn("files", out)  # listed as skipped
 
     def test_bad_input(self):
-        self.assertEqual(call_main(lx, ["--root", "/nonexistent/aegis"])[0], 2)
+        self.assertEqual(call_main(lx, ["--root", "/nonexistent/secskills"])[0], 2)
         self.assertEqual(call_main(lx, ["--root", str(EX / "hardened_root"), "--sysctl-file", "/nonexistent/x"])[0], 2)
         self.assertEqual(call_main(lx, ["--root", str(EX / "hardened_root"), "--shadow", "/nonexistent/x"])[0], 2)
 
@@ -336,7 +336,7 @@ class MacCliTests(unittest.TestCase):
         self.assertIn("No issues found", out)
 
     def test_bad_dirs(self):
-        self.assertEqual(call_main(mac, ["--from-dir", "/nonexistent/aegis"])[0], 2)
+        self.assertEqual(call_main(mac, ["--from-dir", "/nonexistent/secskills"])[0], 2)
         with tempfile.TemporaryDirectory() as empty:
             self.assertEqual(call_main(mac, ["--from-dir", empty])[0], 2)
 

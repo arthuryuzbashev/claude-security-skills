@@ -217,7 +217,7 @@ class AndroidCliTests(unittest.TestCase):
             notman = Path(d, "other.xml")
             notman.write_text("<resources/>")
             self.assertEqual(call_main(andr, [str(notman)])[0], 2)
-        self.assertEqual(call_main(andr, ["/nonexistent/aegis.xml"])[0], 2)
+        self.assertEqual(call_main(andr, ["/nonexistent/secskills.xml"])[0], 2)
 
     def test_help(self):
         proc = run_cli("mobile-appsec", "android_manifest_audit", "--help")

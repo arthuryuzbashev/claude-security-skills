@@ -5,7 +5,7 @@ description: |
   Detects powershell.exe or pwsh.exe started with -EncodedCommand (or a short
   form of it). Attackers use base64 commands to hide what a script does from
   command-line logging and casual review.
-author: Aegis example
+author: Claude Security Skills example
 date: 2026-11-19
 tags:
   - attack.execution
