@@ -2,6 +2,9 @@
 
 Use it after the scanner. It covers the scanner rules (with the fix) and the things a static scan cannot see.
 
+Contents: Dockerfile; Terraform AWS (S3, network, IAM, compute, RDS, logging); Terraform GCP and Azure; Kubernetes (pods, RBAC); docker-compose.
+Kubernetes items follow the Pod Security Standards as published on kubernetes.io (checked 2026-11-19, docs v1.37).
+
 ## Dockerfile
 
 - [ ] Base image pinned to a version and, for production, a digest (IAC-001)
@@ -19,6 +22,7 @@ Use it after the scanner. It covers the scanner rules (with the fix) and the thi
   ```
   `docker build --secret id=npmrc,src=$HOME/.npmrc .`
 - [ ] No `curl ... | sh` (IAC-005). Fetch, verify checksum or signature, then run
+- [ ] No TLS bypass in build steps (IAC-006): `curl -k`, `wget --no-check-certificate`, `pip --trusted-host`, `npm config set strict-ssl false`, `git config http.sslVerify false`, `NODE_TLS_REJECT_UNAUTHORIZED=0`. Behind a TLS-inspecting proxy, add its CA to the image trust store instead
 - [ ] Multi-stage build so compilers and package caches stay out of the runtime image
 - [ ] `.dockerignore` excludes `.git`, `.env`, keys and local configs
 - [ ] `HEALTHCHECK` defined (or a probe in Kubernetes)
@@ -51,6 +55,20 @@ Use it after the scanner. It covers the scanner rules (with the fix) and the thi
 - [ ] Roles for workloads (instance profiles, IRSA / EKS Pod Identity, Lambda execution roles), no long-lived IAM user keys
 - [ ] No access keys in provider blocks or variables defaults (IAC-140). Use environment credentials, SSO or OIDC from CI
 
+### Compute
+
+- [ ] IMDSv2 required on every `aws_instance`, `aws_launch_template` and launch configuration (IAC-150):
+  ```hcl
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1   # 2 if containers on the host need IMDS
+  }
+  ```
+  Account-wide backstop: `aws_ec2_instance_metadata_defaults` with `http_tokens = "required"`
+- [ ] EBS encrypted (IAC-151). One `aws_ebs_encryption_by_default { enabled = true }` per region covers every new volume
+- [ ] EKS API not open to the world (IAC-152): `endpoint_public_access = false`, or `public_access_cidrs` limited to known ranges
+- [ ] Lambda function URLs use `AWS_IAM` auth (IAC-153); a public `NONE` URL must verify a signature itself
+
 ### RDS and data
 
 - [ ] `publicly_accessible = false` (IAC-130)
@@ -59,11 +77,19 @@ Use it after the scanner. It covers the scanner rules (with the fix) and the thi
 - [ ] `deletion_protection = true` and backups retained for production
 - [ ] Remote state bucket encrypted, versioned and private; state files contain secrets in plain text
 
-### Logging and detection (not scanned)
+### Logging and detection
 
-- [ ] CloudTrail multi-region trail with log file validation, delivered to a separate account
+- [ ] CloudTrail multi-region trail with log file validation (IAC-161), delivered to a separate account
+- [ ] `enable_key_rotation = true` on symmetric customer-managed KMS keys (IAC-160)
 - [ ] GuardDuty and Security Hub (or equivalent) enabled
 - [ ] Budget alarms, since cryptomining is the most common result of leaked keys
+
+## Terraform (GCP and Azure)
+
+- [ ] No `allUsers` or `allAuthenticatedUsers` in any `google_*_iam_member` / `_binding` / `_policy` (IAC-170). `allAuthenticatedUsers` means any Google account
+- [ ] `google_compute_firewall` and `azurerm_network_security_rule` / inline `security_rule` follow the same port rules as AWS security groups (IAC-110 to IAC-112). Azure source prefixes `*`, `Internet` and `Any` count as the internet
+- [ ] `azurerm_storage_account`: `allow_nested_items_to_be_public = false`, `min_tls_version = "TLS1_2"`, HTTPS-only on (IAC-171)
+- [ ] GCS buckets: `uniform_bucket_level_access = true` and `public_access_prevention = "enforced"` (not scanned)
 
 ## Kubernetes (Pod Security Standards, Restricted profile)
 
@@ -83,13 +109,14 @@ Per workload:
 - [ ] `runAsNonRoot: true` and a non-zero `runAsUser` (IAC-204)
 - [ ] `allowPrivilegeEscalation: false` (IAC-206)
 - [ ] `capabilities: {drop: ["ALL"]}`, add back only `NET_BIND_SERVICE` if needed (IAC-209)
-- [ ] `seccompProfile: {type: RuntimeDefault}`
-- [ ] `readOnlyRootFilesystem: true`, with `emptyDir` for scratch paths
+- [ ] `seccompProfile: {type: RuntimeDefault}`; never `Unconfined` for seccomp or AppArmor (IAC-211, IAC-212)
+- [ ] `readOnlyRootFilesystem: true`, with `emptyDir` for scratch paths (IAC-212)
+- [ ] No `hostPort` (IAC-213)
 - [ ] `resources.limits.memory` set, plus requests (IAC-205). A namespace `LimitRange` backs this up
 - [ ] Images pinned by digest (IAC-207); admission policy that only allows your registry
 - [ ] Secrets via `secretKeyRef` or an external secrets operator, never `value:` (IAC-210). Enable encryption at rest for Secrets in etcd
 - [ ] `automountServiceAccountToken: false` unless the pod calls the API
-- [ ] RBAC: no `cluster-admin` bindings for apps, no `*` verbs or resources, no `create pods` / `pods/exec` for CI identities you do not fully trust
+- [ ] RBAC: no `*` verbs or resources (IAC-220); no `escalate`, `bind`, `impersonate`, `pods/exec`, `nodes/proxy`, `serviceaccounts/token` or cluster-wide Secret reads outside a break-glass admin role (IAC-221); no bindings to `system:anonymous`, `system:unauthenticated` or `system:authenticated` (IAC-222); no `cluster-admin` bindings for apps
 - [ ] A default-deny `NetworkPolicy` per namespace, then allow what is needed
 
 Secure container template:
@@ -114,6 +141,6 @@ resources:
 - [ ] No `privileged: true` (IAC-301), no `network_mode: host` / `pid: host` / `ipc: host` (IAC-302)
 - [ ] No `/var/run/docker.sock` mount (IAC-303). Mounting it gives root on the host. If a tool needs it, use a filtering socket proxy, read-only
 - [ ] Secrets through `${VAR}` from an untracked `.env` or compose `secrets:` (IAC-304); `.env` in `.gitignore`
-- [ ] Publish ports on `127.0.0.1:` when only local access is needed; `"5432:5432"` binds every interface and Docker's iptables rules bypass ufw
+- [ ] Publish ports on `127.0.0.1:` when only local access is needed; `"5432:5432"` binds every interface and Docker's iptables rules bypass ufw (IAC-307 for database ports)
 - [ ] `user:`, `read_only: true`, `cap_drop: [ALL]`, `security_opt: ["no-new-privileges:true"]`
 - [ ] Images pinned (IAC-306)

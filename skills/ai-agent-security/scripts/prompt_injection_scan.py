@@ -4,7 +4,9 @@
 Looks for instruction-override phrases, text aimed at an AI reader, hidden
 HTML/CSS text, invisible Unicode (zero-width, tag characters, bidi controls),
 base64 that decodes to instructions, image URLs that can leak data through
-query strings, and fake chat-template / tool-call markup. Gives every file a
+query strings, fake chat-template / tool-call markup, requests to read or send
+credential files (MCP tool poisoning) and terminal escape sequences that hide
+text. Gives every file a
 0-100 score. Offline and read-only: it only reads the files you pass.
 
 Usage:
@@ -40,7 +42,7 @@ OVERRIDE = re.compile(
     r"(?:instructions?|prompts?|rules|guidelines|guardrails)\b"
     r"|\bnew\s+(?:system\s+)?instructions?\s*:"
     r"|\byou\s+are\s+now\s+(?:in\s+)?(?:DAN\b|developer\s+mode|jailbreak|unrestricted|an?\s+unfiltered)"
-    r"|\b(?:do\s+not|don'?t|never)\s+(?:tell|inform|alert|mention\s+(?:this\s+)?to|reveal\s+(?:this\s+)?to|show\s+(?:this\s+)?to)\s+the\s+user\b"
+    r"|\b(?:do\s+not|don'?t|never)\s+(?:tell|inform|alert|(?:mention|reveal|show)\s+(?:this\s+)?(?:step\s+|part\s+|instruction\s+)?to)\s+the\s+user\b"
     r"|\bwithout\s+(?:asking|telling|informing|notifying)\s+the\s+user\b"
     r"|\b(?:reveal|print|output|repeat|show)\s+(?:me\s+)?(?:your|the)\s+(?:full\s+|entire\s+)?(?:system\s+prompt|hidden\s+instructions|initial\s+instructions)",
     re.I)
@@ -81,6 +83,22 @@ TEMPLATE_TOKENS = re.compile(r"<\|(?:im_start|im_end|im_sep|system|user|assistan
 TOOL_MARKUP = re.compile(r"</?(?:function_calls|tool_call|tool_use|tool_result|function_call|invoke|system-reminder|"
                          r"system_prompt|system)\b[^>]*>", re.I)
 ROLE_LINE = re.compile(r"^\s*(?:#{1,6}\s*)?(?:system|assistant|human)\s*:\s*\S", re.I)
+
+# Files that hold keys or agent config. A request to read or send one is the core of MCP tool poisoning.
+CRED_PATH = re.compile(r"(?:~|\$HOME|%USERPROFILE%)?/?\.ssh/(?:id_[a-z0-9]+|identity)\b(?!\.pub)|\bid_(?:rsa|dsa|ecdsa|ed25519)\b(?!\.pub)"
+                       r"|\.aws/credentials\b|\.netrc\b|\.git-credentials\b|\.docker/config\.json\b|\.kube/config\b|\.pypirc\b"
+                       r"|\.gnupg/|\bwallet\.dat\b|\bmcp\.json\b|claude_desktop_config\.json|\.claude\.json\b|\.config/gh/hosts\.yml"
+                       r"|\bLogin Data\b|\bkeychain\b|/etc/shadow\b", re.I)
+CRED_VERB = re.compile(r"\b(?:read|cat|open|include|attach|pass|send|upload|copy|paste|print|output|exfiltrate|forward|post|"
+                       r"append|embed|extract|collect|grab|dump|add\s+the\s+contents?)\b", re.I)
+NEGATION = re.compile(r"\b(?:do\s+not|don'?t|never|avoid|must\s+not|should\s+not|shouldn'?t|without)\s+(?:\w+\s+){0,2}$", re.I)
+EMPHASIS_TAG = re.compile(r"<\s*(?:IMPORTANT|CRITICAL|SECRET|HIDDEN|INSTRUCTIONS?)\s*>", re.I)
+
+# Terminal escape sequences. Colors are noise; cursor moves, erase, conceal, OSC 8 links and OSC 52 clipboard writes
+# can hide or rewrite what a person sees in a terminal while the model still reads the raw text.
+ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+ANSI_HOT = re.compile(r"\x1b\[(?:[0-9;]*;)?8(?:;[0-9;]*)?m|\x1b\[\d*[ABCDEFGHJKSTf]|\x1b\[\d*;\d*[Hf]|\x1b\[[0-2]?[JK]"
+                      r"|\x1b\]8;|\x1b\]52;|\x1b\[\?1049[hl]")
 
 SECRET_RE = re.compile(r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
                        r"xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})")
@@ -168,6 +186,30 @@ def scan_text(text: str, path: str = "<stdin>") -> List[Dict[str, str]]:
             out.append(finding("PI-005", "medium", f"{len(bidi)} bidirectional control character(s)",
                                f"{', '.join(sorted({BIDI[c] for c in bidi}))} reorder how text displays, so what a reviewer sees differs from what a model or compiler reads (Trojan Source, CVE-2021-42574). Line: {visible(line)}",
                                "Remove the controls unless the file is real right-to-left text; reject them in code review.", loc))
+
+        cm = CRED_PATH.search(line)
+        if cm:
+            before = line[:cm.start()]
+            vm = None
+            for vm in CRED_VERB.finditer(before[-120:]):
+                pass
+            if vm and not NEGATION.search(before[-120:][:vm.start()]):
+                loud = is_instruction(line) or EMPHASIS_TAG.search(line) or re.search(r"\b(?:sidenote|side note|silently|quietly|secretly)\b", line, re.I)
+                out.append(finding("PI-009", "high" if loud else "medium", f"Request to read or send a credential file ({visible(cm.group(0), 40)})",
+                                   f"Text asks the reader to {vm.group(0).lower()} a file that holds keys or agent config. This is the shape of MCP tool poisoning, "
+                                   f"where a tool description tells the model to read ~/.ssh or mcp.json and slip the contents into a tool argument. Line: {visible(line)}",
+                                   "Do not let an agent act on it. If this is a tool description, remove the server; deny Read on key and config paths in the agent settings.",
+                                   loc))
+
+        esc = ANSI.findall(line)
+        if esc:
+            hot = [e for e in esc if ANSI_HOT.match(e)]
+            out.append(finding("PI-010", "high" if hot else "low", f"{len(esc)} terminal escape sequence(s)",
+                               ("Sequences that move the cursor, erase or conceal text, set hyperlinks or write the clipboard can hide part of a tool description or output from a person in a terminal while the model reads all of it. "
+                                if hot else "Color codes only; harmless on their own, but text an agent reads should not need them. ")
+                               + f"Line: {visible(line)}",
+                               "Strip escape sequences (ESC and C1 controls) from tool descriptions and tool output before showing or feeding them to an agent.",
+                               loc))
 
         for m in TEMPLATE_TOKENS.finditer(line):
             out.append(finding("PI-008", "high", f"Chat-template token {visible(m.group(0))}",

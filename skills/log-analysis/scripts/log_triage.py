@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Triage auth, web and JSON logs fast: brute force, spraying, scanners, injection probes.
+"""Triage auth, web, cloud and JSON logs fast: brute force, spraying, scanners,
+injection probes, risky cloud sign-ins and audit tampering.
 
 Auto-detects each line: Linux auth.log / secure (sshd, sudo), nginx/apache
-combined or common access logs, and JSON lines (generic, map field names with
---field). Prints a summary, findings and top talkers.
+combined or common access logs, AWS CloudTrail records (one per line or a
+whole {"Records": [...]} file on one line), Microsoft Entra ID sign-in logs
+(Log Analytics / Sentinel export, Graph API signIns, Azure diagnostic export)
+and generic JSON lines (map field names with --field). Prints a summary,
+findings and top talkers.
 
 Usage:
   log_triage.py /var/log/auth.log
@@ -11,6 +15,8 @@ Usage:
   log_triage.py events.jsonl --field ip=source.ip --field user=user.name --field outcome=event.outcome
   zcat auth.log.2.gz | log_triage.py --file - --year 2026 --fail-on medium
   log_triage.py auth.log --sudo-users alice,ops --window 600 --brute-threshold 20
+  log_triage.py cloudtrail.jsonl --fail-on high
+  log_triage.py entra_signins.jsonl --mfa-threshold 5
 """
 from __future__ import annotations
 
@@ -61,6 +67,19 @@ DEFAULT_FIELDS = {
     "status": ["http.response.status_code", "status", "status_code", "response"],
     "ua": ["user_agent.original", "user_agent", "http_user_agent", "ua", "useragent"],
 }
+
+
+# Entra ID sign-in result codes (AADSTS numbers without the prefix).
+ENTRA_PASSWORD_FAIL = {"50126": "invalid username or password", "50053": "account locked or sign-in blocked",
+                       "50034": "account not found", "50055": "password expired",
+                       "50056": "invalid or null password", "50057": "account disabled"}
+ENTRA_MFA_DENIED = {"500121"}
+ENTRA_MFA_INTERRUPT = {"50074", "50076", "50079", "50072", "50158"}
+CLOUDTRAIL_TAMPER = {"StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors", "PutInsightSelectors",
+                     "DeleteEventDataStore", "StopEventDataStoreIngestion"}
+CLOUDTRAIL_DENIED = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation",
+                     "Client.UnauthorizedOperation", "UnauthorizedAccess"}
+CLOUDTRAIL_CRED_EVENTS = {"CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile"}
 
 
 def finding(fid, severity, title, detail, fix, location=None):
@@ -205,6 +224,88 @@ def parse_json(line: str, fields: Dict[str, List[str]]) -> Optional[Dict]:
     return {"kind": "other", "ts": ts, "ip": ip, "user": user}
 
 
+def _first(obj, paths):
+    for path in paths:
+        v = _get(obj, path)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def _cloudtrail_event(rec: Dict) -> Dict:
+    ident = rec.get("userIdentity") if isinstance(rec.get("userIdentity"), dict) else {}
+    itype = str(ident.get("type") or "")
+    arn = str(ident.get("arn") or "")
+    if itype == "Root":
+        user = "root"
+    else:
+        user = str(ident.get("userName") or _get(ident, "sessionContext.sessionIssuer.userName")
+                   or (arn.rsplit("/", 1)[-1] if arn else "") or ident.get("principalId") or itype or "?")
+    params = rec.get("requestParameters") if isinstance(rec.get("requestParameters"), dict) else {}
+    ev = {"kind": "cloud", "source": "cloudtrail", "ts": _parse_ts(str(rec.get("eventTime", ""))),
+          "ip": str(rec.get("sourceIPAddress") or "") or None, "user": user, "identity_type": itype,
+          "event_name": str(rec.get("eventName") or ""), "event_source": str(rec.get("eventSource") or ""),
+          "error": str(rec.get("errorCode") or ""), "params": params,
+          "invoked_by": str(ident.get("invokedBy") or ""),
+          "console": str(_get(rec, "responseElements.ConsoleLogin") or ""),
+          "mfa": str(_get(rec, "additionalEventData.MFAUsed") or "")}
+    if ev["event_name"] == "ConsoleLogin":
+        if ev["console"] == "Success" and not ev["error"]:
+            ev.update(kind="auth", outcome="accepted")
+        elif ev["console"] == "Failure" or ev["error"]:
+            ev.update(kind="auth", outcome="failed")
+    return ev
+
+
+def _is_cloudtrail(obj: Dict) -> bool:
+    return "eventName" in obj and "eventSource" in obj and ("userIdentity" in obj or "eventVersion" in obj)
+
+
+def _entra_event(obj: Optional[Dict]) -> Optional[Dict]:
+    if not isinstance(obj, dict):
+        return None
+    rec = obj
+    if isinstance(obj.get("properties"), dict) and str(obj.get("category", "")).lower().endswith("signinlogs"):
+        rec = dict(obj["properties"], **{k: v for k, v in obj.items() if k != "properties"})
+    code = _first(rec, ["ResultType", "status.errorCode", "resultType"])
+    user = _first(rec, ["UserPrincipalName", "userPrincipalName"])
+    if code is None or user is None:
+        return None
+    code = str(code)
+    ev = {"source": "entra", "ts": _parse_ts(str(_first(rec, ["TimeGenerated", "createdDateTime", "time"]) or "")),
+          "ip": str(_first(rec, ["IPAddress", "ipAddress", "callerIpAddress"]) or "") or None,
+          "user": str(user), "code": code,
+          "app": str(_first(rec, ["AppDisplayName", "appDisplayName"]) or ""),
+          "protocol": str(_first(rec, ["AuthenticationProtocol", "authenticationProtocol"]) or "")}
+    if code == "0":
+        ev.update(kind="auth", outcome="accepted")
+    elif code in ENTRA_PASSWORD_FAIL:
+        ev.update(kind="auth", outcome="failed")
+    else:
+        ev.update(kind="signin", outcome="other")
+    return ev
+
+
+def parse_cloud(line: str):
+    """Return (format label, [events]) for CloudTrail or Entra sign-in JSON, else None."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("Records"), list):
+        recs = [r for r in obj["Records"] if isinstance(r, dict) and _is_cloudtrail(r)]
+        return ("cloudtrail", [_cloudtrail_event(r) for r in recs]) if recs else None
+    if _is_cloudtrail(obj):
+        return "cloudtrail", [_cloudtrail_event(obj)]
+    if isinstance(obj.get("value"), list):
+        evs = [e for e in (_entra_event(v) for v in obj["value"]) if e]
+        return ("entra", evs) if evs else None
+    ev = _entra_event(obj)
+    return ("entra", [ev]) if ev else None
+
+
 def parse_lines(lines: Iterable[str], fmt: str = "auto", year: Optional[int] = None,
                 fields: Optional[Dict[str, List[str]]] = None) -> Dict:
     year = year or datetime.now(timezone.utc).year
@@ -217,6 +318,14 @@ def parse_lines(lines: Iterable[str], fmt: str = "auto", year: Optional[int] = N
             continue
         ev = None
         if fmt in ("auto", "json") and line.lstrip().startswith("{"):
+            cloud = parse_cloud(line)
+            if cloud is not None:
+                label, evs = cloud
+                for c in evs:
+                    c["line"] = no
+                    events.append(c)
+                formats[label] += len(evs)
+                continue
             ev, kind = parse_json(line, fields), "json"
         if ev is None and fmt in ("auto", "web"):
             ev, kind = parse_access(line), "web"
@@ -396,6 +505,97 @@ def detect_web(events: List[Dict], cfg) -> List[Dict]:
     return out
 
 
+def detect_cloud(events: List[Dict], cfg) -> List[Dict]:
+    out = []
+    ct = [e for e in events if e.get("source") == "cloudtrail"]
+    # CLOUD-001 / 002: risky console sign-ins
+    for e in ct:
+        if e["event_name"] != "ConsoleLogin" or e.get("outcome") != "accepted":
+            continue
+        where = f"{e.get('ip') or '?'}, line {e['line']}"
+        if e["identity_type"] == "Root":
+            no_mfa = e["mfa"] == "No"
+            out.append(finding("CLOUD-001", "critical" if no_mfa else "high", "AWS root account console sign-in",
+                               "The root user signed in to the console" + (" without MFA" if no_mfa else "")
+                               + ". Root should only be used for the few tasks that need it.",
+                               "Confirm with the account owner. If unexpected: reset the root password, check root MFA, "
+                               "review everything the session did in CloudTrail and set a root sign-in alarm.", where))
+        elif e["mfa"] == "No" and e["identity_type"] == "IAMUser":
+            out.append(finding("CLOUD-002", "medium", f"AWS console sign-in without MFA by {e['user']}",
+                               "An IAM user signed in to the console with a password only.",
+                               "Require MFA for console users (IAM policy with aws:MultiFactorAuthPresent) or move them to IAM Identity Center.",
+                               where))
+    # CLOUD-003: audit trail tampering
+    for e in ct:
+        if e["event_name"] in CLOUDTRAIL_TAMPER and (e["event_source"] in ("", "cloudtrail.amazonaws.com")):
+            target = e["params"].get("name") or e["params"].get("trailName") or e["params"].get("eventDataStore") or "?"
+            ok = not e["error"]
+            out.append(finding("CLOUD-003", "high" if ok else "medium",
+                               f"CloudTrail {e['event_name']} by {e['user']}" + ("" if ok else " (failed)"),
+                               f"Trail or event data store '{target}' was changed or stopped"
+                               + ("" if ok else f", the call failed with {e['error']}") + ". Attackers turn off logging before acting (ATT&CK T1685.002).",
+                               "Check the trail is logging again (GetTrailStatus), find who made the call and why, and protect trails with an SCP that denies StopLogging and DeleteTrail.",
+                               f"{e.get('ip') or '?'}, line {e['line']}"))
+    # CLOUD-004: new credentials for an IAM user
+    for e in ct:
+        if e["event_name"] in CLOUDTRAIL_CRED_EVENTS and not e["error"]:
+            target = str(e["params"].get("userName") or e["user"])
+            other = target != e["user"]
+            out.append(finding("CLOUD-004", "medium" if other else "low",
+                               f"{e['event_name']} for {target}" + (f" by {e['user']}" if other else ""),
+                               ("New credentials were created for a different user. " if other else "A user created credentials for itself. ")
+                               + "Extra access keys or console passwords keep access alive after a password reset (ATT&CK T1098.001).",
+                               "Confirm the change was requested. If not: delete the new key or login profile, then review what the caller did.",
+                               f"{e.get('ip') or '?'}, line {e['line']}"))
+    # CLOUD-007: many denied API calls from one identity (stolen key recon)
+    denied = defaultdict(list)
+    for e in ct:
+        if e["error"] in CLOUDTRAIL_DENIED:
+            denied[e["user"]].append(e)
+    for user, evs in sorted(denied.items()):
+        n, a, b = _max_in_window([e["ts"] for e in evs], cfg.window)
+        if n >= cfg.denied_threshold:
+            calls = Counter(e["event_name"] for e in evs)
+            out.append(finding("CLOUD-007", "medium", f"Burst of denied AWS API calls by {user}",
+                               f"{n} access denied errors within {cfg.window}s ({len(evs)} total). {_span(a, b)}. "
+                               f"Calls: {', '.join(f'{c}({k})' for c, k in calls.most_common(5))}. Stolen keys often probe what they can do.",
+                               "Check where the calls came from and whether the key owner made them. Rotate the key if not.",
+                               f"{user}, {_lines(evs)}"))
+    en = [e for e in events if e.get("source") == "entra"]
+    # CLOUD-005: MFA push fatigue
+    by_user = defaultdict(list)
+    for e in en:
+        if e["code"] in ENTRA_MFA_DENIED:
+            by_user[e["user"]].append(e)
+    for user, evs in sorted(by_user.items()):
+        n, a, b = _max_in_window([e["ts"] for e in evs], cfg.mfa_window)
+        if n < cfg.mfa_threshold:
+            continue
+        last = max(e["line"] for e in evs)
+        success = [e for e in en if e["user"] == user and e["code"] == "0" and e["line"] > last]
+        ips = sorted({e["ip"] for e in evs if e.get("ip")})
+        out.append(finding("CLOUD-005", "critical" if success else "high", f"MFA fatigue against {user}",
+                           f"{n} MFA requests denied by the user within {cfg.mfa_window}s ({len(evs)} total). {_span(a, b)}. "
+                           f"Sources: {', '.join(ips[:5]) or '?'}."
+                           + (f" A successful sign-in followed on line {success[0]['line']}." if success else "")
+                           + " Repeated pushes mean someone already has the password (ATT&CK T1621).",
+                           "Reset the password, revoke sessions (revokeSignInSessions), turn on number matching, and ask the user whether they approved a prompt.",
+                           f"{user}, {_lines(evs)}"))
+    # CLOUD-006: device code sign-ins
+    dev = defaultdict(list)
+    for e in en:
+        if e["protocol"].lower() == "devicecode" and e["code"] == "0":
+            dev[e["user"]].append(e)
+    for user, evs in sorted(dev.items()):
+        apps = sorted({e["app"] for e in evs if e["app"]})
+        out.append(finding("CLOUD-006", "medium", f"Device code sign-in by {user}",
+                           f"{len(evs)} successful sign-in(s) with the device code flow to {', '.join(apps[:3]) or 'an app'}. "
+                           "Device code phishing tricks users into approving an attacker's session (ATT&CK T1528).",
+                           "Confirm the user signed in on a TV, CLI or kiosk. If not, revoke sessions. Block the device code flow with Conditional Access where it is not needed.",
+                           f"{user}, {_lines(evs)}"))
+    return out
+
+
 def top_talkers(events: List[Dict], n: int = 5) -> List[Dict]:
     stats = defaultdict(lambda: {"events": 0, "auth_failed": 0, "auth_ok": 0, "web": 0, "errors_4xx_5xx": 0})
     for e in events:
@@ -416,7 +616,8 @@ def top_talkers(events: List[Dict], n: int = 5) -> List[Dict]:
 
 class Config:
     def __init__(self, window=300, brute_threshold=10, spray_users=5, success_after=3,
-                 success_lookback=3600, web_window=60, notfound_threshold=20, sudo_users=None):
+                 success_lookback=3600, web_window=60, notfound_threshold=20, sudo_users=None,
+                 mfa_threshold=3, mfa_window=3600, denied_threshold=10):
         self.window = window
         self.brute_threshold = brute_threshold
         self.spray_users = spray_users
@@ -425,6 +626,9 @@ class Config:
         self.web_window = web_window
         self.notfound_threshold = notfound_threshold
         self.sudo_users = sudo_users
+        self.mfa_threshold = mfa_threshold
+        self.mfa_window = mfa_window
+        self.denied_threshold = denied_threshold
 
 
 def triage(lines: Iterable[str], cfg: Optional[Config] = None, fmt: str = "auto",
@@ -432,7 +636,7 @@ def triage(lines: Iterable[str], cfg: Optional[Config] = None, fmt: str = "auto"
     cfg = cfg or Config()
     parsed = parse_lines(lines, fmt, year, fields)
     events = parsed["events"]
-    findings = detect_auth(events, cfg) + detect_web(events, cfg)
+    findings = detect_auth(events, cfg) + detect_web(events, cfg) + detect_cloud(events, cfg)
     findings.sort(key=lambda f: (-SEVERITY_ORDER.index(f["severity"]), f["id"]))
     stamps = sorted(e["ts"] for e in events if e.get("ts"))
     return {
@@ -478,7 +682,7 @@ def parse_field_args(pairs: List[str]) -> Dict[str, List[str]]:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Triage auth.log, web access logs and JSON lines for attacks.")
+    ap = argparse.ArgumentParser(description="Triage auth.log, web access logs, CloudTrail, Entra ID sign-ins and JSON lines for attacks.")
     ap.add_argument("path", nargs="?", help="log file")
     ap.add_argument("--file", help="log file; '-' for stdin")
     ap.add_argument("--format", choices=["auto", "auth", "web", "json"], default="auto")
@@ -492,6 +696,9 @@ def main(argv=None) -> int:
     ap.add_argument("--web-window", type=int, default=60, help="404 burst window in seconds (default 60)")
     ap.add_argument("--notfound-threshold", type=int, default=20, help="404s per IP in web window (default 20)")
     ap.add_argument("--sudo-users", help="comma list of users expected to sudo to root")
+    ap.add_argument("--mfa-threshold", type=int, default=3, help="Entra MFA denials per user in --mfa-window (default 3)")
+    ap.add_argument("--mfa-window", type=int, default=3600, help="MFA fatigue window in seconds (default 3600)")
+    ap.add_argument("--denied-threshold", type=int, default=10, help="denied AWS API calls per identity in window (default 10)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any finding is at or above this severity (default: high)")
@@ -509,10 +716,11 @@ def main(argv=None) -> int:
         return 2
     cfg = Config(args.window, args.brute_threshold, args.spray_users, args.success_after, 3600,
                  args.web_window, args.notfound_threshold,
-                 {u.strip() for u in args.sudo_users.split(",") if u.strip()} if args.sudo_users else None)
+                 {u.strip() for u in args.sudo_users.split(",") if u.strip()} if args.sudo_users else None,
+                 args.mfa_threshold, args.mfa_window, args.denied_threshold)
     result = triage(lines, cfg, args.format, args.year, fields)
     if result["events_parsed"] == 0:
-        print("error: no recognisable log lines (auth.log, access log or JSON lines)", file=sys.stderr)
+        print("error: no recognisable log lines (auth.log, access log, CloudTrail, Entra sign-ins or JSON lines)", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(dict(source=src, **result), indent=2))

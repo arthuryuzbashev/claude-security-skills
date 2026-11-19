@@ -5,8 +5,10 @@ Pure-Python parser for classic pcap (microsecond and nanosecond, both byte
 orders) and pcapng (SHB, IDB, EPB, SPB), with Ethernet (incl. VLAN tags),
 Linux cooked capture v1/v2, raw IP and BSD loopback link types, IPv4/IPv6,
 TCP and UDP. Reports top talkers, protocols, ports, DNS queries, HTTP
-Host/User-Agent from cleartext requests, TLS SNI from ClientHello, and flags
-long or random-looking DNS names (possible tunneling) and odd ports.
+Host/User-Agent from cleartext requests, TLS SNI and the JA4 client
+fingerprint from ClientHello, and flags long or random-looking DNS names
+(possible tunneling), encrypted DNS to public resolvers, TLS without SNI
+and odd ports.
 
 Reads a saved file only; it never captures traffic.
 
@@ -18,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import math
@@ -266,14 +269,28 @@ def parse_http_request(payload: bytes) -> Optional[Dict]:
             "user_agent": headers.get("user-agent", "")}
 
 
-def parse_tls_sni(payload: bytes) -> Optional[str]:
-    """Server name from a TLS ClientHello in one TCP segment."""
+def _is_grease(v: int) -> bool:
+    """GREASE values (RFC 8701): 0x0a0a, 0x1a1a ... 0xfafa."""
+    return (v & 0x0F0F) == 0x0A0A and (v >> 8) == (v & 0xFF)
+
+
+def parse_client_hello(payload: bytes) -> Optional[Dict]:
+    """Fields of a TLS ClientHello that starts one TCP segment, or None.
+
+    Returns {version, ciphers, extensions, sni, alpn, sig_algs, supported_versions}.
+    A hello cut off by the segment end still returns what was read so far.
+    """
     if len(payload) < 43 or payload[0] != 0x16 or payload[1] != 0x03 or payload[5] != 0x01:
         return None
+    out = {"version": 0, "ciphers": [], "extensions": [], "sni": None, "alpn": [], "sig_algs": [],
+           "supported_versions": []}
     try:
+        out["version"] = struct.unpack_from(">H", payload, 9)[0]
         off = 5 + 4 + 2 + 32               # record hdr, handshake hdr, version, random
         off += 1 + payload[off]            # session id
         cs_len = struct.unpack_from(">H", payload, off)[0]
+        cs_end = min(len(payload), off + 2 + cs_len)
+        out["ciphers"] = [struct.unpack_from(">H", payload, i)[0] for i in range(off + 2, cs_end - 1, 2)]
         off += 2 + cs_len
         off += 1 + payload[off]            # compression methods
         ext_total = struct.unpack_from(">H", payload, off)[0]
@@ -282,19 +299,88 @@ def parse_tls_sni(payload: bytes) -> Optional[str]:
         while off + 4 <= end:
             etype, elen = struct.unpack_from(">HH", payload, off)
             off += 4
-            if etype == 0 and elen >= 5:
-                list_len = struct.unpack_from(">H", payload, off)[0]
-                p, lend = off + 2, off + 2 + list_len
+            body = payload[off:off + elen]
+            out["extensions"].append(etype)
+            if etype == 0 and len(body) >= 5 and out["sni"] is None:
+                list_len = struct.unpack_from(">H", body, 0)[0]
+                p, lend = 2, min(len(body), 2 + list_len)
                 while p + 3 <= lend:
-                    ntype, nlen = payload[p], struct.unpack_from(">H", payload, p + 1)[0]
+                    ntype, nlen = body[p], struct.unpack_from(">H", body, p + 1)[0]
                     if ntype == 0:
-                        return payload[p + 3:p + 3 + nlen].decode("ascii", "replace").lower()
+                        out["sni"] = body[p + 3:p + 3 + nlen].decode("ascii", "replace").lower()
+                        break
                     p += 3 + nlen
-                return None
+            elif etype == 16 and len(body) >= 2:          # ALPN protocol list
+                p, lend = 2, min(len(body), 2 + struct.unpack_from(">H", body, 0)[0])
+                while p < lend:
+                    n = body[p]
+                    out["alpn"].append(bytes(body[p + 1:p + 1 + n]))
+                    p += 1 + n
+            elif etype == 13 and len(body) >= 2:          # signature_algorithms
+                lend = min(len(body), 2 + struct.unpack_from(">H", body, 0)[0])
+                out["sig_algs"] = [struct.unpack_from(">H", body, i)[0] for i in range(2, lend - 1, 2)]
+            elif etype == 43 and len(body) >= 1:          # supported_versions (client form)
+                lend = min(len(body), 1 + body[0])
+                out["supported_versions"] = [struct.unpack_from(">H", body, i)[0] for i in range(1, lend - 1, 2)]
             off += elen
     except (struct.error, IndexError):
-        return None
-    return None
+        pass
+    return out
+
+
+def parse_tls_sni(payload: bytes) -> Optional[str]:
+    """Server name from a TLS ClientHello in one TCP segment."""
+    hello = parse_client_hello(payload)
+    return hello["sni"] if hello else None
+
+
+TLS_VERSION_CODES = {0x0304: "13", 0x0303: "12", 0x0302: "11", 0x0301: "10", 0x0300: "s3", 0x0002: "s2",
+                     0xFEFF: "d1", 0xFEFD: "d2", 0xFEFC: "d3"}
+
+
+def _sha12(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:12] if text else "000000000000"
+
+
+def ja4(hello: Dict, transport: str = "t") -> str:
+    """JA4 TLS client fingerprint (FoxIO JA4 spec, BSD 3-Clause), computed from parsed hello fields.
+
+    a: transport, TLS version, SNI d/i, cipher count, extension count, ALPN first+last char
+    b: sha256 of the sorted cipher list, first 12 hex chars
+    c: sha256 of the sorted extensions (without SNI and ALPN) + "_" + signature algorithms in order
+    GREASE values are ignored everywhere.
+    """
+    ciphers = [c for c in hello["ciphers"] if not _is_grease(c)]
+    exts = [e for e in hello["extensions"] if not _is_grease(e)]
+    versions = [v for v in hello.get("supported_versions", []) if not _is_grease(v)]
+    version = TLS_VERSION_CODES.get(max(versions) if versions else hello["version"], "00")
+    alpn = "00"
+    if hello["alpn"] and hello["alpn"][0]:
+        first = hello["alpn"][0]
+        a, b = first[0], first[-1]
+        if all(48 <= x <= 57 or 65 <= x <= 90 or 97 <= x <= 122 for x in (a, b)):
+            alpn = chr(a) + chr(b)
+        else:
+            alpn = f"{a:02x}"[0] + f"{b:02x}"[-1]
+    part_a = (f"{transport}{version}{'d' if 0 in exts else 'i'}"
+              f"{min(len(ciphers), 99):02d}{min(len(exts), 99):02d}{alpn}")
+    part_b = _sha12(",".join(sorted(f"{c:04x}" for c in ciphers)))
+    ext_text = ",".join(sorted(f"{e:04x}" for e in exts if e not in (0x0000, 0x0010)))
+    sigs = ",".join(f"{x:04x}" for x in hello["sig_algs"] if not _is_grease(x))
+    part_c = _sha12(ext_text + ("_" + sigs if sigs and ext_text else ""))
+    return f"{part_a}_{part_b}_{part_c}"
+
+
+# Public DNS-over-HTTPS resolver names. Seeing one in SNI means DNS is leaving the network
+# where the local resolver, DNS logs and DNS filtering cannot see it.
+DOH_SNI = {
+    "dns.google", "dns.google.com", "8888.google", "cloudflare-dns.com", "mozilla.cloudflare-dns.com",
+    "chrome.cloudflare-dns.com", "security.cloudflare-dns.com", "family.cloudflare-dns.com",
+    "1dot1dot1dot1.cloudflare-dns.com", "one.one.one.one", "dns.quad9.net", "dns9.quad9.net",
+    "dns10.quad9.net", "dns11.quad9.net", "doh.opendns.com", "doh.familyshield.opendns.com",
+    "dns.nextdns.io", "doh.cleanbrowsing.org", "dns.adguard-dns.com", "dns.adguard.com",
+    "doh.dns.sb", "dns.alidns.com", "doh.pub", "dns.mullvad.net", "doh.mullvad.net",
+}
 
 
 # ---------------------------------------------------------------- analysis
@@ -365,6 +451,8 @@ def summarize(data: bytes, top: int = 10) -> Dict:
     dns_nx = Counter()
     http = Counter()
     sni = Counter()
+    ja4s: Dict[str, Dict] = {}
+    no_sni = Counter()
     port_peers: Dict[int, set] = defaultdict(set)
     syn_targets: Dict[Tuple[str, str], set] = defaultdict(set)
     for ts, lt, frame, orig in packets:
@@ -414,10 +502,21 @@ def summarize(data: bytes, top: int = 10) -> Dict:
                 app = "HTTP"
                 http[(req["host"], req["user_agent"], req["method"], ip["dst"], svc)] += 1
             else:
-                name = parse_tls_sni(payload)
-                if name:
+                hello = parse_client_hello(payload)
+                if hello:
                     app = "TLS"
-                    sni[(name, ip["dst"], svc)] += 1
+                    name = hello["sni"]
+                    if name:
+                        sni[(name, ip["dst"], svc)] += 1
+                    else:
+                        no_sni[(ip["dst"], svc)] += 1
+                    fp = ja4(hello)
+                    e = ja4s.setdefault(fp, {"ja4": fp, "count": 0, "alpn": [], "server_names": [], "clients": []})
+                    e["count"] += 1
+                    for key, val in (("server_names", name), ("clients", ip["src"]),
+                                     ("alpn", hello["alpn"][0].decode("ascii", "replace") if hello["alpn"] else None)):
+                        if val and val not in e[key] and len(e[key]) < 10:
+                            e[key].append(val)
         protos[f"{pname}/{app}" if app else pname] += 1
 
     if n == 0:
@@ -437,6 +536,8 @@ def summarize(data: bytes, top: int = 10) -> Dict:
         "dns_queries": dns_list, "dns_nxdomain": dict(dns_nx.most_common(top)),
         "dns_nxdomain_total": sum(dns_nx.values()),
         "http_requests": http_list, "tls_sni": sni_list,
+        "tls_ja4": sorted(ja4s.values(), key=lambda e: -e["count"]),
+        "tls_no_sni": [{"dst": k[0], "port": k[1], "count": v} for k, v in no_sni.most_common()],
     }
     result["findings"] = analyze(result, port_peers, syn_targets)
     return result
@@ -511,6 +612,25 @@ def analyze(r: Dict, port_peers: Dict[int, set], syn_targets: Dict[Tuple[str, st
         if why:
             out.append(finding("NET-040", "low", "Odd TLS server name",
                                f"SNI {s['server_name'][:80]} ({why}).", "Check the domain's reputation.", f"{s['dst']}:{s['port']}"))
+    doh = sorted({s["server_name"] for s in r["tls_sni"] if s["server_name"] in DOH_SNI})
+    dot = sorted(ip for ip in port_peers.get(853, ()) if is_public(ip))
+    if doh or dot:
+        parts = ([f"DoH resolver names in SNI: {', '.join(doh[:5])}"] if doh else []) + \
+                ([f"TCP/853 (DNS over TLS) to {', '.join(dot[:5])}"] if dot else [])
+        out.append(finding("NET-041", "low", "Encrypted DNS to a public resolver (DoH/DoT)",
+                           "; ".join(parts) + ". These lookups skip the local resolver and its logs.",
+                           "Check it matches policy (browsers can turn DoH on by themselves). If DNS must stay "
+                           "visible, point clients at an internal resolver, use the browser canary domain or "
+                           "enterprise policy, and block known DoH/DoT endpoints at the egress.",
+                           (doh + dot)[0]))
+    public_no_sni = [t for t in r.get("tls_no_sni", []) if is_public(t["dst"])]
+    if public_no_sni:
+        out.append(finding("NET-042", "low", "TLS to a public IP without a server name",
+                           f"{sum(t['count'] for t in public_no_sni)} ClientHello(s) without SNI to "
+                           f"{', '.join(t['dst'] + ':' + str(t['port']) for t in public_no_sni[:5])}. "
+                           "Browsers always send SNI; scripted clients and some implants connect to a bare IP.",
+                           "Match the JA4 in tls_ja4 to the client process (EDR or Zeek ssl.log) and look up the IP.",
+                           f"{public_no_sni[0]['dst']}:{public_no_sni[0]['port']}"))
     out.sort(key=lambda f: -SEVERITY_ORDER.index(f["severity"]))
     return out
 
@@ -535,6 +655,10 @@ def render_text(r: Dict, top: int) -> str:
     if r["tls_sni"]:
         lines.append("TLS server names (SNI):")
         lines += [f"  {s['count']:>4}  {s['server_name']} -> {s['dst']}:{s['port']}" for s in r["tls_sni"][:top * 2]]
+    if r.get("tls_ja4"):
+        lines.append("TLS client fingerprints (JA4):")
+        lines += [f"  {e['count']:>4}  {e['ja4']}  {', '.join(e['server_names'][:3]) or '(no SNI)'}"
+                  for e in r["tls_ja4"][:top]]
     lines.append("")
     if not r["findings"]:
         lines.append("No findings.")

@@ -134,6 +134,11 @@ def parse_autoupdate(text: str) -> Result:
         out.append(finding("MAC-015", "low", "Updates are not downloaded automatically",
                            "Patches sit unapplied longer because users have to start the download.",
                            "Automatic Updates: turn on Download new updates when available."))
+    if values.get("AutomaticallyInstallMacOSUpdates") == "0":
+        out.append(finding("MAC-016", "low", "macOS updates are not installed automatically",
+                           "Downloaded macOS point releases (which carry most security fixes) wait for someone to "
+                           "click Install. CIS macOS benchmarks expect this on.",
+                           "Automatic Updates: turn on Install macOS updates."))
     status = "fail" if out else "pass"
     on = ", ".join(f"{k}={values[k]}" for k in ("AutomaticCheckEnabled", "AutomaticDownload", "CriticalUpdateInstall",
                                                  "ConfigDataInstall", "AutomaticallyInstallMacOSUpdates") if k in values)

@@ -70,7 +70,7 @@ Also review after an incident, a major change, a new supplier for a critical ser
 
 Required: `id`, `title`, `likelihood`, `impact`.
 Recommended: `owner`, `category`, `control_effectiveness`, `controls`, `treatment`, `last_review`, `next_review`, `status`.
-Optional: `residual_likelihood`, `residual_impact`. Dates are ISO (`2026-11-19`). `status: closed` keeps a row for history but leaves it out of the analysis.
+Optional: `residual_likelihood`, `residual_impact`, `accepted_until` (when a risk acceptance lapses and must be re-approved), `treatment_due` (target date for the treatment action; `target_date` and `due_date` also work). Dates are ISO (`2026-11-19`). `status: closed` keeps a row for history but leaves it out of the analysis.
 
 ## Script finding ids
 
@@ -83,3 +83,9 @@ Optional: `residual_likelihood`, `residual_impact`. Dates are ISO (`2026-11-19`)
 | RR-005 | High or critical residual risk with no treatment decision |
 | RR-006 | Residual score above inherent |
 | RR-007 | Control effectiveness claimed with no controls listed |
+| RR-008 | Risk acceptance expired (`accepted_until` passed); high when residual is critical |
+| RR-009 | Same risk id used on more than one row (closed rows included) |
+| RR-010 | Treatment action overdue (`treatment_due` passed) on a risk that is not accepted |
+
+Every risk acceptance should carry an end date. ISO/IEC 27001:2022 clause 6.1.3 needs risk owners to approve the
+treatment plan and accept residual risk; an acceptance with no end date tends to never be looked at again.

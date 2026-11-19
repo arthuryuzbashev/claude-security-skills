@@ -19,7 +19,15 @@ Where to revoke the common ones:
 | Stripe key | Dashboard, Developers, API keys, roll key |
 | Google API key | Cloud console, APIs and services, Credentials, regenerate and add restrictions |
 | SendGrid key | Settings, API Keys, delete |
-| npm token | `npm token revoke <id>` or npmjs.com access tokens page |
+| npm token | `npm token revoke <id>` or npmjs.com access tokens page. Classic tokens were revoked by npm in late 2025; publish from CI with trusted publishing (OIDC) instead of a stored token |
+| Anthropic API key (`sk-ant-`) | Anthropic Console, API keys, delete; check usage for the window |
+| OpenAI API key (`sk-proj-`, `sk-svcacct-`, `sk-admin-`) | OpenAI platform, API keys (project or organization admin keys) |
+| GitLab token (`glpat-`, `gldt-`, `glrt-`...) | User or project Access tokens page; group owners can revoke from the credentials inventory |
+| Hugging Face (`hf_`) | Settings, Access Tokens, invalidate |
+| PyPI (`pypi-`) | Account settings, API tokens; then move the project to trusted publishing |
+| Azure AD client secret (`...Q~...`) | Entra ID, App registrations, Certificates and secrets |
+| Vault token (`hvs.`, `hvb.`) | `vault token revoke <accessor>` and check the audit device log |
+| Terraform state or `.tfstate` | Rotate every secret the state holds (database passwords, keys), move state to an encrypted remote backend |
 | SSH or TLS private key | Remove the public key from every place that trusts it (authorized_keys, deploy keys, certificates) and issue a new pair |
 | Database password | Change the password for that role, check for other roles sharing it |
 
@@ -44,7 +52,8 @@ Write down: secret type, location, exposure window, scopes, evidence of use, rot
 - `.gitignore` every `.env*` except `.env.example`, which holds fake values only
 - Pre-commit: `git diff --cached | secret_scan.py --stdin --fail-on medium`
 - CI: `secret_scan.py . --json --fail-on high` on every pull request
-- Turn on the hosting provider's secret scanning and push protection where available
+- Turn on the hosting provider's secret scanning and push protection where available. `secret_scan.py` is a fast first pass; for git history and 200+ provider shapes run gitleaks (`gitleaks git .`) or trufflehog as well
+- Keep test fixtures obviously fake (`FAKE`, `EXAMPLE`, broken prefixes) so they never look like real provider tokens to push protection
 - Prefer short-lived credentials (OIDC from CI to the cloud, IAM roles) over long-lived keys
 
 ## Triage of scanner hits
@@ -57,3 +66,5 @@ Write down: secret type, location, exposure window, scopes, evidence of use, rot
 | High-entropy value under a secret-like name | Check with the owner; if real, treat as a leak |
 | Private key block | Critical unless the file is a documented test vector |
 | Committed `.env` | Read it: any real value in it is a leak |
+| JWT (SEC-051) | Decode it with web-appsec `jwt_inspect.py`. A public "anon" key is fine; a service-role, admin or long-lived token is a leak |
+| Credential file (SEC-031) | SSH private keys and `.git-credentials`: critical in practice. `.tfstate`: read it, it usually holds generated passwords |

@@ -31,11 +31,16 @@ spec:
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: app
       image: example.test/app:1.0.0
       securityContext:
         allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
       resources:
         limits: {cpu: 200m, memory: 128Mi}
 """
@@ -61,7 +66,7 @@ class DockerfileTests(unittest.TestCase):
     def test_insecure_example(self):
         text = (EX / "insecure" / "Dockerfile").read_text()
         found = ids(iac.scan_dockerfile(text))
-        self.assertEqual(found, {"IAC-001", "IAC-002", "IAC-003", "IAC-004", "IAC-005"})
+        self.assertEqual(found, {"IAC-001", "IAC-002", "IAC-003", "IAC-004", "IAC-005", "IAC-006"})
 
     def test_secure_example_clean(self):
         self.assertEqual(iac.scan_dockerfile((EX / "secure" / "Dockerfile").read_text()), [])
@@ -79,6 +84,14 @@ class DockerfileTests(unittest.TestCase):
 
     def test_env_reference_not_secret(self):
         self.assertEqual(iac.scan_dockerfile("FROM alpine:3.19\nARG NPM_TOKEN\nENV TOKEN=${NPM_TOKEN}\nUSER 1\n"), [])
+
+    def test_tls_verification_off(self):
+        for run in ("RUN curl -fsSLk https://x.example.test/a -o a", "RUN wget --no-check-certificate https://x.example.test/a",
+                    "RUN git config --global http.sslVerify false", "ENV NODE_TLS_REJECT_UNAUTHORIZED=0"):
+            f = iac.scan_dockerfile(f"FROM alpine:3.19\n{run}\nUSER 1\n")
+            self.assertEqual(ids(f), {"IAC-006"}, run)
+        safe = "FROM alpine:3.19\nRUN curl -fsSL -o /tmp/kit.tgz https://x.example.test/kit.tgz && wget -q https://x.example.test/b\nUSER 1\n"
+        self.assertEqual(iac.scan_dockerfile(safe), [])
 
 
 class TerraformTests(unittest.TestCase):
@@ -108,6 +121,42 @@ class TerraformTests(unittest.TestCase):
         here = 'resource "aws_iam_role_policy" "p" {\n  policy = <<EOF\n{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}\nEOF\n}\n'
         self.assertEqual(tf(here), [], "Deny statements are not grants")
 
+    def test_imdsv1_and_ebs(self):
+        inst = 'resource "aws_instance" "i" {\n  ami = "ami-1"\n%s}\n'
+        self.assertEqual(ids(tf(inst % "")), {"IAC-150"})
+        req = '  metadata_options {\n    http_tokens = "required"\n  }\n'
+        self.assertEqual(tf(inst % req), [])
+        lt = 'resource "aws_launch_template" "t" {\n  metadata_options {\n    http_tokens = "optional"\n  }\n}\n'
+        self.assertEqual(ids(tf(lt)), {"IAC-150"})
+        enc = inst % (req + '  root_block_device {\n    volume_size = 8\n  }\n')
+        self.assertEqual(ids(tf(enc)), {"IAC-151"})
+        self.assertEqual(tf(enc + 'resource "aws_ebs_encryption_by_default" "on" {\n  enabled = true\n}\n'), [])
+        self.assertEqual(ids(tf('resource "aws_ebs_volume" "v" {\n  size = 1\n}\n')), {"IAC-151"})
+        self.assertEqual(tf('resource "aws_ebs_volume" "v" {\n  encrypted = true\n}\n'), [])
+
+    def test_eks_lambda_kms_cloudtrail(self):
+        eks = 'resource "aws_eks_cluster" "c" {\n  vpc_config {\n    subnet_ids = ["s"]\n%s  }\n}\n'
+        self.assertEqual(ids(tf(eks % "")), {"IAC-152"})
+        self.assertEqual(tf(eks % '    public_access_cidrs = ["198.51.100.0/24"]\n'), [])
+        self.assertEqual(ids(tf('resource "aws_lambda_function_url" "u" {\n  authorization_type = "NONE"\n}\n')), {"IAC-153"})
+        self.assertEqual(tf('resource "aws_lambda_function_url" "u" {\n  authorization_type = "AWS_IAM"\n}\n'), [])
+        self.assertEqual(ids(tf('resource "aws_kms_key" "k" {\n  description = "x"\n}\n')), {"IAC-160"})
+        self.assertEqual(tf('resource "aws_kms_key" "k" {\n  customer_master_key_spec = "RSA_2048"\n}\n'), [], "asymmetric keys cannot rotate")
+        off = tf('resource "aws_cloudtrail" "t" {\n  enable_logging = false\n}\n')
+        self.assertEqual([(x["id"], x["severity"]) for x in off], [("IAC-161", "medium")])
+
+    def test_gcp_and_azure(self):
+        found = ids(tf((EX / "insecure" / "gcp_azure.tf").read_text()))
+        self.assertEqual(found, {"IAC-110", "IAC-170", "IAC-171"})
+        self.assertEqual(tf((EX / "secure" / "gcp_azure.tf").read_text()), [])
+        fw = 'resource "google_compute_firewall" "f" {\n  source_ranges = ["0.0.0.0/0"]\n  allow {\n    protocol = "all"\n  }\n}\n'
+        self.assertEqual(ids(tf(fw)), {"IAC-111"})
+        nsg = ('resource "azurerm_network_security_group" "g" {\n  security_rule {\n    direction = "Inbound"\n    access = "Allow"\n'
+               '    protocol = "Tcp"\n    source_address_prefix = "*"\n    destination_port_ranges = ["443", "5432"]\n  }\n}\n')
+        self.assertEqual(ids(tf(nsg)), {"IAC-112"})
+        self.assertEqual(tf(nsg.replace('"Allow"', '"Deny"')), [])
+        self.assertEqual(ids(tf('resource "google_project_iam_binding" "b" {\n  members = ["allAuthenticatedUsers"]\n}\n')), {"IAC-170"})
+
     def test_s3_split_resources_link_to_bucket(self):
         text = (EX / "secure" / "main.tf").read_text().replace('aws_s3_bucket.assets.id\n  versioning', 'aws_s3_bucket.other.id\n  versioning')
         self.assertIn("IAC-103", ids(tf(text)))
@@ -124,7 +173,7 @@ class KubernetesTests(unittest.TestCase):
         self.assertEqual(k8s((EX / "secure" / "deployment.yaml").read_text()), [])
 
     def test_capabilities_and_host_pid(self):
-        text = POD.replace("allowPrivilegeEscalation: false", "allowPrivilegeEscalation: false\n        capabilities:\n          add: [SYS_ADMIN]")
+        text = POD.replace("drop: [ALL]", "drop: [ALL]\n          add: [SYS_ADMIN]")
         text = text.replace("spec:\n  securityContext", "spec:\n  hostPID: true\n  securityContext")
         self.assertEqual(ids(k8s(text)), {"IAC-208", "IAC-209"})
 
@@ -133,6 +182,31 @@ class KubernetesTests(unittest.TestCase):
         f = k8s(text)
         self.assertEqual(f[0]["id"], "IAC-203")
         self.assertEqual(f[0]["severity"], "critical")
+
+    def test_restricted_profile_gaps(self):
+        f = k8s(POD.replace("        readOnlyRootFilesystem: true\n", ""))
+        self.assertEqual(ids(f), {"IAC-212"})
+        self.assertIn("readOnlyRootFilesystem", f[0]["title"])
+        no_seccomp = k8s(POD.replace("    seccompProfile:\n      type: RuntimeDefault\n", ""))
+        self.assertEqual(ids(no_seccomp), {"IAC-212"})
+        unconfined = k8s(POD.replace("type: RuntimeDefault", "type: Unconfined"))
+        self.assertEqual(ids(unconfined), {"IAC-211"})
+        hostport = k8s(POD.replace("      resources:", "      ports:\n        - containerPort: 80\n          hostPort: 80\n      resources:"))
+        self.assertEqual(ids(hostport), {"IAC-213"})
+        self.assertEqual(k8s(POD.replace("      resources:", "      ports:\n        - containerPort: 80\n      resources:")), [])
+
+    def test_rbac(self):
+        found = ids(k8s((EX / "insecure" / "deployment.yaml").read_text()))
+        self.assertTrue({"IAC-220", "IAC-221", "IAC-222"} <= found)
+        role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: %s\nmetadata:\n  name: r\nrules:\n  - apiGroups: ['']\n    resources: [%s]\n    verbs: [%s]\n"
+        self.assertEqual([(x["id"], x["severity"]) for x in k8s(role % ("ClusterRole", "'*'", "'*'"))], [("IAC-220", "critical")])
+        self.assertEqual([(x["id"], x["severity"]) for x in k8s(role % ("Role", "secrets", "get"))], [("IAC-221", "medium")])
+        self.assertEqual(ids(k8s(role % ("ClusterRole", "users, groups", "impersonate"))), {"IAC-221"})
+        self.assertEqual(k8s(role % ("ClusterRole", "pods, pods/log", "get, list, watch")), [])
+        bind = ("apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: b\nroleRef:\n  kind: ClusterRole\n"
+                "  name: view\nsubjects:\n  - kind: Group\n    name: %s\n")
+        self.assertEqual([(x["id"], x["severity"]) for x in k8s(bind % "system:authenticated")], [("IAC-222", "high")])
+        self.assertEqual(k8s(bind % "platform-team"), [])
 
 
 class ComposeTests(unittest.TestCase):
@@ -144,7 +218,14 @@ class ComposeTests(unittest.TestCase):
 
     def test_insecure_example(self):
         found = ids(self.scan((EX / "insecure" / "docker-compose.yml").read_text()))
-        self.assertEqual(found, {"IAC-301", "IAC-302", "IAC-303", "IAC-304", "IAC-306"})
+        self.assertEqual(found, {"IAC-301", "IAC-302", "IAC-303", "IAC-304", "IAC-306", "IAC-307"})
+
+    def test_published_data_port(self):
+        svc = "services:\n  db:\n    image: redis:7.2\n    ports:\n      - %s\n"
+        self.assertEqual(ids(self.scan(svc % '"6379:6379"')), {"IAC-307"})
+        self.assertEqual(ids(self.scan(svc % "{target: 6379, published: 6379}")), {"IAC-307"})
+        self.assertEqual(self.scan(svc % '"127.0.0.1:6379:6379"'), [])
+        self.assertEqual(self.scan(svc % '"8080:80"'), [])
 
     def test_secure_example_clean(self):
         self.assertEqual(self.scan((EX / "secure" / "docker-compose.yml").read_text()), [])
@@ -156,7 +237,7 @@ class IacCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         data = json.loads(out)
         self.assertEqual(set(data), {"scanned", "count", "findings"})
-        self.assertEqual(len(data["scanned"]), 4)
+        self.assertEqual(len(data["scanned"]), 5)
         for f in data["findings"]:
             self.assertTrue({"id", "severity", "title", "detail", "fix", "location"} <= set(f))
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", out)
@@ -241,6 +322,15 @@ class IamAuditTests(unittest.TestCase):
         self.assertNotIn("IAM-010", ids(alone))
         combined = iam.audit_sources([("a", a), ("b", b)], combine=True)
         self.assertIn("Privilege escalation path: PassRole + EC2", {x["title"] for x in combined})
+
+    def test_new_escalation_paths(self):
+        titles = lambda doc: {x["title"] for x in self.audit(doc) if x["id"] == "IAM-010"}
+        self.assertIn("Privilege escalation path: SSM SendCommand", titles(stmt(Action="ssm:SendCommand", Resource="*")))
+        ecs = stmt(Action=["iam:PassRole", "ecs:RegisterTaskDefinition", "ecs:RunTask"], Resource="*")
+        self.assertIn("Privilege escalation path: PassRole + ECS task", titles(ecs))
+        cb = stmt(Action=["iam:PassRole", "codebuild:CreateProject", "codebuild:StartBuild"], Resource="*")
+        self.assertIn("Privilege escalation path: PassRole + CodeBuild", titles(cb))
+        self.assertEqual(titles(stmt(Action=["ecs:RunTask", "codebuild:StartBuild", "ssm:GetParameter"], Resource="*")), set())
 
     def test_old_version(self):
         self.assertEqual(ids(self.audit({"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/k"}]})), {"IAM-040"})

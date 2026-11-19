@@ -5,6 +5,7 @@ from _helpers import call_main, load_script, run_cli, skill_path
 
 email = load_script("security-recon", "email_auth_audit")
 surface = load_script("security-recon", "surface_map")
+posture = load_script("security-recon", "domain_posture")
 EX = skill_path("security-recon", "examples")
 
 
@@ -54,6 +55,11 @@ class SpfTests(unittest.TestCase):
         findings, _ = email.check_spf(["v=spf1 include:x.example.test -all"], lambda n: [])
         self.assertIn("EML-011", ids(findings))
 
+    def test_broad_ip_range(self):
+        self.assertIn("EML-012", ids(email.check_spf(["v=spf1 ip4:198.0.0.0/8 -all"])[0]))
+        self.assertIn("EML-012", ids(email.check_spf(["v=spf1 ip6:2001:db8::/16 -all"])[0]))
+        self.assertNotIn("EML-012", ids(email.check_spf(["v=spf1 ip4:192.0.2.0/24 ip4:192.0.2.1 ip6:2001:db8::/48 -all"])[0]))
+
     def test_split_txt_strings_join(self):
         self.assertEqual(email.join_txt_strings('"v=spf1 a" " -all"'), "v=spf1 a -all")
 
@@ -73,6 +79,38 @@ class DmarcTests(unittest.TestCase):
         self.assertIn("DMR-004", ids(email.check_dmarc(["v=DMARC1; rua=mailto:d@example.test"])))
         self.assertIn("DMR-003", ids(email.check_dmarc(["p=reject; v=DMARC1"])))
         self.assertIn("DMR-002", ids(email.check_dmarc(["v=DMARC1; p=reject", "v=DMARC1; p=none"])))
+
+
+    def test_rfc9989_missing_p_with_rua_is_medium(self):
+        sev = {f["id"]: f["severity"] for f in email.check_dmarc(["v=DMARC1; rua=mailto:d@example.test"])}
+        self.assertEqual(sev["DMR-004"], "medium")
+        sev = {f["id"]: f["severity"] for f in email.check_dmarc(["v=DMARC1; p=bogus"])}
+        self.assertEqual(sev["DMR-004"], "high")
+
+    def test_test_mode_np_and_report_uris(self):
+        self.assertIn("DMR-010", ids(email.check_dmarc(["v=DMARC1; p=reject; t=y; rua=mailto:d@example.test"])))
+        self.assertNotIn("DMR-010", ids(email.check_dmarc(["v=DMARC1; p=reject; t=n; rua=mailto:d@example.test"])))
+        self.assertIn("DMR-011", ids(email.check_dmarc(["v=DMARC1; p=reject; np=none; rua=mailto:d@example.test"])))
+        self.assertNotIn("DMR-011", ids(email.check_dmarc(["v=DMARC1; p=reject; np=reject; rua=mailto:d@example.test"])))
+        self.assertIn("DMR-012", ids(email.check_dmarc(["v=DMARC1; p=reject; rua=https://reports.example.test/d"])))
+        self.assertNotIn("DMR-012", ids(email.check_dmarc(["v=DMARC1; p=reject; rua=mailto:a@example.test,mailto:b@example.test"])))
+
+
+class BimiTests(unittest.TestCase):
+    GOOD = "v=BIMI1; l=https://example.test/logo.svg; a=https://example.test/vmc.pem"
+
+    def test_good_record_with_enforced_dmarc(self):
+        self.assertEqual(email.check_bimi([self.GOOD], ["v=DMARC1; p=reject; rua=mailto:d@example.test"]), [])
+        self.assertEqual(email.check_bimi([], ["v=DMARC1; p=none"]), [], "no BIMI record is not a finding")
+
+    def test_findings(self):
+        self.assertIn("BIM-001", ids(email.check_bimi([self.GOOD], ["v=DMARC1; p=none"])))
+        self.assertIn("BIM-001", ids(email.check_bimi([self.GOOD], ["v=DMARC1; p=quarantine; pct=50"])))
+        self.assertEqual(email.check_bimi([self.GOOD]), [], "DMARC not given: prerequisite skipped")
+        self.assertIn("BIM-002", ids(email.check_bimi(["v=BIMI1; l=http://example.test/logo.png; a=https://x.test/c.pem"])))
+        self.assertIn("BIM-003", ids(email.check_bimi(["v=BIMI1; l=https://example.test/logo.svg"])))
+        self.assertIn("BIM-004", ids(email.check_bimi([self.GOOD, self.GOOD])))
+        self.assertEqual(email.check_bimi(["v=BIMI1; l=;"]), [], "empty l= is an opt-out")
 
 
 class DkimTests(unittest.TestCase):
@@ -98,6 +136,11 @@ class MtaStsTests(unittest.TestCase):
         self.assertEqual(ids(email.check_mta_sts(["v=STSv1; id=1"], testing)), {"MTS-005", "MTS-008"})
         self.assertIn("MTS-003", ids(email.check_mta_sts(["v=STSv1; id=2024-01-01"])))
         self.assertIn("MTS-001", ids(email.check_mta_sts([])))
+
+    def test_max_age_above_limit(self):
+        good = (EX / "mta-sts.txt").read_text()
+        self.assertIn("MTS-009", ids(email.check_mta_sts(["v=STSv1; id=1"], good.replace("1209600", "63072000"))))
+        self.assertNotIn("MTS-009", ids(email.check_mta_sts(["v=STSv1; id=1"], good.replace("1209600", "31557600"))))
         self.assertIn("MTS-007", ids(email.check_mta_sts(["v=STSv1; id=1"], "version: STSv1\nmode: enforce\nmax_age: 604800")))
 
     def test_tls_rpt(self):
@@ -112,7 +155,8 @@ class EmailCliTests(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(set(data), {"target", "records", "spf_lookups", "score", "grade", "findings"})
         self.assertEqual(data["spf_lookups"], 11)
-        for expected in ("EML-009", "EML-005", "EML-008", "DMR-006", "DMR-008", "DMR-009", "DKM-006", "MTS-003", "TRP-001"):
+        for expected in ("EML-009", "EML-005", "EML-008", "DMR-006", "DMR-008", "DMR-009", "DKM-006", "MTS-003", "TRP-001",
+                         "EML-012", "BIM-001", "BIM-002", "BIM-003"):
             self.assertIn(expected, ids(data["findings"]))
         for f in data["findings"]:
             self.assertTrue({"id", "severity", "title", "detail", "fix"} <= set(f))
@@ -121,7 +165,10 @@ class EmailCliTests(unittest.TestCase):
         code, out, _ = call_main(email, ["--file", str(EX / "strong_records.txt"),
                                          "--mta-sts-policy", str(EX / "mta-sts.txt"), "--json"])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["grade"], "A")
+        data = json.loads(out)
+        self.assertEqual(data["grade"], "A")
+        self.assertEqual(data["findings"], [])
+        self.assertEqual(len(data["records"]["bimi"]), 1)
 
     def test_inline_only_checks_given_records(self):
         code, out, _ = call_main(email, ["--spf", "v=spf1 -all", "--json"])
@@ -190,6 +237,73 @@ class SurfaceMapTests(unittest.TestCase):
 
     def test_help_subprocess(self):
         self.assertEqual(run_cli("security-recon", "surface_map", "--help").returncode, 0)
+
+    def test_api_docs_category_and_takeover_list(self):
+        self.assertEqual(surface.classify("swagger.example.test", "example.test"), ["api-docs"])
+        self.assertEqual(surface.classify("graphql-dev.example.test", "example.test"), ["non-prod", "api-docs"])
+        self.assertEqual(surface.classify("api.example.test", "example.test"), [])
+        _, findings = surface.analyze(["swagger.example.test"], [], "example.test")
+        self.assertEqual(ids(findings), {"SRF-011"})
+        dns = {"help.example.test": {"cname": ["acme.helpjuice.com"], "ips": [], "known": True},
+               "shop.example.test": {"cname": ["acme.wpengine.com"], "ips": [], "known": True}}
+        _, findings = surface.analyze(sorted(dns), [], "example.test", dns)
+        by_host = {(f["id"], f.get("location")) for f in findings}
+        self.assertIn(("SRF-021", "help.example.test"), by_host)
+        self.assertIn(("SRF-022", "shop.example.test"), by_host, "WP Engine is listed as not vulnerable")
+
+
+class DomainPostureTests(unittest.TestCase):
+    TODAY = __import__("datetime").date(2026, 11, 19)
+
+    def test_good_security_txt_is_quiet(self):
+        self.assertEqual(posture.check_security_txt((EX / "security.txt").read_text(), self.TODAY), [])
+
+    def test_security_txt_findings(self):
+        self.assertEqual(ids(posture.check_security_txt(None, self.TODAY)), {"STX-001"})
+        self.assertIn("STX-002", ids(posture.check_security_txt("Expires: 2027-01-01T00:00:00Z", self.TODAY)))
+        self.assertIn("STX-003", ids(posture.check_security_txt("Contact: mailto:s@example.test", self.TODAY)))
+        old = "Contact: mailto:s@example.test\nExpires: 2026-01-01T00:00:00Z"
+        self.assertIn("STX-004", ids(posture.check_security_txt(old, self.TODAY)))
+        far = "Contact: mailto:s@example.test\nExpires: 2030-01-01T00:00:00Z"
+        self.assertIn("STX-005", ids(posture.check_security_txt(far, self.TODAY)))
+        bad = "Contact: http://example.test/r\nContact: security team\nExpires: 2027-01-01T00:00:00Z"
+        self.assertEqual([f["id"] for f in posture.check_security_txt(bad, self.TODAY)], ["STX-006", "STX-006"])
+        twice = "Contact: mailto:s@example.test\nExpires: 2027-01-01T00:00:00Z\nExpires: 2027-02-01T00:00:00Z"
+        self.assertIn("STX-007", ids(posture.check_security_txt(twice, self.TODAY)))
+        good = (EX / "security.txt").read_text()
+        self.assertIn("STX-008", ids(posture.check_security_txt(good, self.TODAY, legacy_only=True)))
+
+    def test_signed_security_txt(self):
+        signed = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n" + (EX / "security.txt").read_text()
+                  + "-----BEGIN PGP SIGNATURE-----\nFAKEFAKE\n-----END PGP SIGNATURE-----\n")
+        self.assertTrue(posture.parse_security_txt(signed)["signed"])
+        self.assertEqual(posture.check_security_txt(signed, self.TODAY), [])
+
+    def test_caa_and_dnssec(self):
+        self.assertEqual(ids(posture.check_caa([], "example.test")), {"CAA-001"})
+        self.assertIn("CAA-002", ids(posture.check_caa(['128 tbs "x"', '0 iodef "mailto:s@example.test"'], "example.test")))
+        self.assertNotIn("CAA-002", ids(posture.check_caa(['128 issue "letsencrypt.org"'], "example.test")))
+        self.assertEqual(ids(posture.check_caa(['0 issue "letsencrypt.org"'], "example.test")), {"CAA-003"})
+        self.assertEqual(ids(posture.check_dnssec([], "example.test")), {"DNS-001"})
+        self.assertEqual(posture.check_dnssec(["2371 13 2 ABCD"], "example.test"), [])
+
+    def test_cli_offline(self):
+        code, out, _ = call_main(posture, ["www.example.test", "--records", str(EX / "posture_records.txt"),
+                                           "--security-txt", str(EX / "security.txt"), "--today", "2026-11-19",
+                                           "--json", "--fail-on", "info"])
+        self.assertEqual(code, 0, "host inside the zone inherits its CAA and DS")
+        data = json.loads(out)
+        self.assertEqual(set(data), {"target", "checks", "security_txt", "caa", "dnssec", "findings"})
+        self.assertTrue(data["dnssec"])
+        code, _, _ = call_main(posture, ["--security-txt", "-", "--today", "2026-11-19", "--fail-on", "medium"],
+                               stdin="Contact: mailto:s@example.test\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(call_main(posture, [])[0], 2)
+        self.assertEqual(call_main(posture, ["--security-txt", str(EX / "missing.txt")])[0], 2)
+        self.assertEqual(call_main(posture, ["--security-txt", "-", "--today", "nope"], stdin="x")[0], 2)
+
+    def test_help_subprocess(self):
+        self.assertEqual(run_cli("security-recon", "domain_posture", "--help").returncode, 0)
 
 
 if __name__ == "__main__":

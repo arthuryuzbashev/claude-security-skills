@@ -86,7 +86,14 @@ def check_hsts(headers, is_https) -> List[Dict[str, str]]:
         return [finding("HDR-002", "medium", "HSTS max-age is short",
                         f"max-age={max_age}s. Under 180 days leaves long gaps between visits unprotected.",
                         "Raise max-age to 31536000 (1 year) once HTTPS is stable everywhere.")]
+    if not re.search(r"includesubdomains", value, re.I):
+        return [finding("HDR-003", "info", "HSTS does not cover subdomains",
+                        "Without includeSubDomains a plain-HTTP subdomain can set cookies for the parent domain (cookie tossing).",
+                        "Add includeSubDomains once every subdomain serves HTTPS.")]
     return []
+
+
+NONCE_HASH_PREFIXES = ("'nonce-", "'sha256-", "'sha384-", "'sha512-")
 
 
 def check_csp(headers) -> List[Dict[str, str]]:
@@ -107,7 +114,11 @@ def check_csp(headers) -> List[Dict[str, str]]:
         if bits:
             directives[bits[0].lower()] = [b.lower() for b in bits[1:]]
     script_src = directives.get("script-src", directives.get("default-src", []))
-    if "'unsafe-inline'" in script_src and not any(s.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-")) for s in script_src):
+    has_nonce_or_hash = any(src.startswith(NONCE_HASH_PREFIXES) for src in script_src)
+    # CSP3 browsers ignore host and scheme sources when 'strict-dynamic' sits next to a nonce or hash,
+    # so `'nonce-x' 'strict-dynamic' https:` is the recommended backward-compatible strict policy
+    strict_dynamic = "'strict-dynamic'" in script_src and has_nonce_or_hash
+    if "'unsafe-inline'" in script_src and not has_nonce_or_hash:
         out.append(finding("HDR-012", "medium", "CSP allows inline scripts",
                            "'unsafe-inline' in script-src cancels most of the XSS protection CSP gives.",
                            "Move inline scripts to files or use nonces/hashes, then drop 'unsafe-inline'."))
@@ -115,7 +126,7 @@ def check_csp(headers) -> List[Dict[str, str]]:
         out.append(finding("HDR-013", "low", "CSP allows eval",
                            "'unsafe-eval' lets strings run as code (eval, new Function).",
                            "Remove 'unsafe-eval' after replacing eval-style calls."))
-    if any(s in ("*", "http:", "https:", "data:") for s in script_src):
+    if not strict_dynamic and any(s in ("*", "http:", "https:", "data:") for s in script_src):
         out.append(finding("HDR-014", "medium", "CSP script-src is a wildcard",
                            f"script-src contains {', '.join(s for s in script_src if s in ('*', 'http:', 'https:', 'data:'))}, which allows scripts from almost anywhere.",
                            "List the exact script origins, or use 'strict-dynamic' with nonces."))
@@ -127,6 +138,10 @@ def check_csp(headers) -> List[Dict[str, str]]:
         out.append(finding("HDR-016", "low", "CSP does not restrict object-src",
                            "Plugins (<object>, <embed>) fall back to default-src or nothing.",
                            "Add object-src 'none'."))
+    if has_nonce_or_hash and "base-uri" not in directives:
+        out.append(finding("HDR-017", "low", "Nonce-based CSP without base-uri",
+                           "An injected <base href> can repoint relative script URLs to another host, and the page's nonce still applies.",
+                           "Add base-uri 'none' (or 'self')."))
     return out
 
 
@@ -161,18 +176,34 @@ def check_simple(headers) -> List[Dict[str, str]]:
         out.append(finding("HDR-032", "info", "Permissions-Policy missing",
                            "Camera, microphone, geolocation and similar APIs are not explicitly turned off.",
                            "Permissions-Policy: camera=(), microphone=(), geolocation=()"))
+    xxp = (_first(headers, "x-xss-protection") or "").strip()
+    if xxp.startswith("1"):
+        out.append(finding("HDR-033", "low", "X-XSS-Protection filter turned on",
+                           f"'{xxp}'. The old XSS auditor is gone from current browsers, and where it still runs it has caused cross-site leaks.",
+                           "Send X-XSS-Protection: 0 (or drop the header) and rely on CSP."))
+    ctype = (_first(headers, "content-type") or "").lower()
+    if "text/html" in ctype and _first(headers, "cross-origin-opener-policy") is None:
+        out.append(finding("HDR-034", "info", "Cross-Origin-Opener-Policy missing",
+                           "Pages opened from another site keep a window reference to this one, which enables tabnabbing and cross-site leak tricks.",
+                           "Cross-Origin-Opener-Policy: same-origin (or same-origin-allow-popups if you rely on OAuth or payment popups)."))
     acao = _first(headers, "access-control-allow-origin")
     acac = (_first(headers, "access-control-allow-credentials") or "").lower() == "true"
     if acao == "*" and acac:
         out.append(finding("HDR-040", "high", "CORS wildcard with credentials",
                            "Allow-Origin * together with Allow-Credentials true is a broken config; some proxies rewrite it into a reflected origin.",
                            "Return a specific allow-listed origin and add Vary: Origin."))
+    elif (acao or "").strip().lower() == "null":
+        out.append(finding("HDR-042", "high" if acac else "medium", "CORS allows the null origin",
+                           "Sandboxed iframes, data: URLs and local files all send Origin: null, so any site can obtain it."
+                           + (" Credentials are allowed too." if acac else ""),
+                           "Never allow-list null. Return a specific allow-listed origin and add Vary: Origin."))
     elif acao == "*":
         out.append(finding("HDR-041", "info", "CORS allows any origin",
                            "Fine for public, unauthenticated data. A problem if this endpoint serves user data.",
                            "Limit Access-Control-Allow-Origin to known origins for private endpoints."))
     leaks = []
-    for name in ("server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version"):
+    for name in ("server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+                 "x-php-version", "x-generator", "x-owa-version", "x-powered-cms"):
         v = _first(headers, name)
         if v and re.search(r"\d", v):
             leaks.append(f"{name}: {v}")
@@ -180,6 +211,11 @@ def check_simple(headers) -> List[Dict[str, str]]:
         out.append(finding("HDR-050", "low", "Version numbers disclosed",
                            "; ".join(leaks) + ". Exact versions make it easy to match known CVEs.",
                            "Strip version numbers from Server / X-Powered-By at the proxy or framework."))
+    smap = _first(headers, "sourcemap") or _first(headers, "x-sourcemap")
+    if smap:
+        out.append(finding("HDR-052", "low", "Source map advertised in a header",
+                           f"SourceMap: {smap}. Source maps hand out the original front-end source, comments and internal paths.",
+                           "Do not ship source maps to production, or serve them only to authenticated staff."))
     return out
 
 
@@ -199,6 +235,21 @@ def parse_cookie(raw: str) -> Tuple[str, Dict[str, str]]:
 SESSIONISH = re.compile(r"(sess|sid|auth|token|jwt|login|remember|csrf|xsrf)", re.I)
 
 
+def _prefix_problem(name: str, attrs: Dict[str, str]) -> Optional[str]:
+    if name.startswith("__Host-"):
+        problems = []
+        if "secure" not in attrs:
+            problems.append("no Secure")
+        if attrs.get("path", "") != "/":
+            problems.append("Path is not /")
+        if "domain" in attrs:
+            problems.append("Domain is set")
+        return ("__Host- cookie with " + ", ".join(problems) + ".") if problems else None
+    if name.startswith("__Secure-") and "secure" not in attrs:
+        return "__Secure- cookie without Secure."
+    return None
+
+
 def check_cookies(headers, is_https) -> List[Dict[str, str]]:
     out = []
     for raw in headers.get("set-cookie", []):
@@ -216,6 +267,11 @@ def check_cookies(headers, is_https) -> List[Dict[str, str]]:
             out.append(finding("CK-002", "medium", f"Cookie {name}: SameSite=None without Secure",
                                "Browsers reject SameSite=None cookies that are not Secure.",
                                "Add Secure, or use SameSite=Lax."))
+        prefix_problem = _prefix_problem(name, attrs)
+        if prefix_problem:
+            out.append(finding("CK-003", "low", f"Cookie {name}: prefix rules not met",
+                               f"{prefix_problem} Browsers reject the cookie outright, so it silently never gets set.",
+                               "__Host- cookies need Secure, Path=/ and no Domain; __Secure- cookies need Secure."))
         if missing:
             out.append(finding("CK-001", sev, f"Cookie {name} missing {', '.join(missing)}",
                                ("Looks like a session or auth cookie. " if sensitive else "") +

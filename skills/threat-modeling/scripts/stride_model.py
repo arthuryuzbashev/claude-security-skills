@@ -5,13 +5,17 @@ Input is JSON or a small YAML subset with components (id, type, zone, logging),
 optional zones (name -> trust level) and data flows (from, to, protocol, auth,
 encrypted, data). Element threats follow STRIDE-per-element; flow threats are
 generated for flows that cross a trust boundary. Flags call out unauthenticated
-boundary crossings, plaintext sensitive data and missing logging.
+boundary crossings, plaintext sensitive data, missing logging and LLM components
+that mix private data, untrusted input and an outbound channel. With --privacy
+(or "privacy: true" in the model) LINDDUN privacy threats are added for elements
+and flows that handle personal data.
 
 Usage:
   stride_model.py system.yaml
   stride_model.py system.json --json
   stride_model.py system.yaml --mermaid-only > dfd.mmd
   stride_model.py system.yaml --output threat-model.md --fail-on never
+  stride_model.py system.yaml --privacy
 """
 from __future__ import annotations
 
@@ -32,7 +36,12 @@ DEFAULT_TRUST = {"internet": 0, "public": 0, "external": 0, "third-party": 0, "t
                  "private": 2, "cloud": 2, "data": 3, "restricted": 3, "admin": 3, "secure": 3}
 DATA_LEVEL = {"public": 0, "none": 0, "internal": 1, "confidential": 2, "pii": 2, "personal": 2, "financial": 2,
               "secret": 3, "secrets": 3, "credentials": 3, "payment": 3, "pci": 3, "phi": 3, "health": 3,
-              "restricted": 3}
+              "restricted": 3, "biometric": 3, "genetic": 3, "location": 2}
+# Labels that mean data about a person (drives the LINDDUN privacy threats).
+PERSONAL_DATA = {"pii", "personal", "phi", "health", "biometric", "genetic", "location", "financial", "payment",
+                 "pci"}
+# Special categories (GDPR Art. 9 style): deniability and detection matter most here.
+SPECIAL_DATA = {"phi", "health", "biometric", "genetic"}
 ENCRYPTED_PROTOCOLS = {"https", "tls", "mtls", "wss", "sftp", "ssh", "ftps", "grpcs", "amqps", "mqtts", "ldaps",
                        "smtps", "imaps", "ipsec", "wireguard", "vpn", "postgres+tls", "mysql+tls", "redis+tls", "kafka+tls"}
 PLAINTEXT_PROTOCOLS = {"http", "ws", "ftp", "telnet", "amqp", "mqtt", "ldap", "tcp", "udp", "smtp", "imap", "pop3",
@@ -237,7 +246,7 @@ def load_model(text: str) -> Dict[str, Any]:
         warnings.append("model has no flows; only element threats are generated")
     _key_flows(flows)
     return {"name": str(data.get("name") or "System"), "trust": trust, "components": comps, "flows": flows,
-            "warnings": warnings}
+            "warnings": warnings, "privacy": bool(_as_bool(data.get("privacy")))}
 
 
 def _key_flows(flows: List[Dict[str, Any]]) -> None:
@@ -269,7 +278,7 @@ def analyze_flow(flow: Dict[str, Any], model: Dict[str, Any]) -> Dict[str, Any]:
             "crosses_boundary": src["zone"] != dst["zone"], "inbound": t_dst > t_src,
             "from_trust": t_src, "to_trust": t_dst, "encrypted": enc, "authenticated": authenticated,
             "data_level": level, "sensitive": level >= 2, "data": flow["data"], "protocol": flow["protocol"],
-            "auth": auth}
+            "auth": auth, "personal": any(d in PERSONAL_DATA for d in flow["data"])}
 
 
 # ---------------------------------------------------------------- threat catalog
@@ -323,16 +332,56 @@ TYPE_THREATS = {
          "Enforce every rule server-side; treat the app as untrusted; use platform attestation where it matters."),
     ],
     "llm": [
-        ("LLM-T01", "T", "Prompt injection", "Text from users, documents, web pages or tool results steers {name} into ignoring its instructions.",
+        ("LLM-T01", "T", "Prompt injection (OWASP LLM01)", "Text from users, documents, web pages or tool results steers {name} into ignoring its instructions.",
          "Treat all model input as untrusted, keep instructions and data separate, filter tool output, require confirmation for risky actions."),
-        ("LLM-I01", "I", "Sensitive data disclosed by the model", "{name} reveals system prompts, other users' data or secrets placed in its context.",
+        ("LLM-I01", "I", "Sensitive data disclosed by the model (LLM02)", "{name} reveals other users' data, personal data or secrets placed in its context or training data.",
          "Keep secrets out of prompts, filter retrieval by the caller's permissions, scan outputs for sensitive data."),
-        ("LLM-E01", "E", "Excessive agency", "{name} can call tools or APIs with more rights than the user who asked.",
+        ("LLM-E01", "E", "Excessive agency (LLM06)", "{name} can call tools or APIs with more rights than the user who asked.",
          "Give tools least privilege and the end user's permissions, allow-list actions, human approval for destructive or costly ones."),
-        ("LLM-D01", "D", "Cost and token exhaustion", "Long or looping requests to {name} burn tokens and money or block other users.",
+        ("LLM-D01", "D", "Unbounded consumption (LLM10)", "Long or looping requests to {name} burn tokens and money, block other users or let someone copy the model through bulk queries.",
          "Per-user token and request quotas, max input and output length, loop limits on agents, spend alerts."),
+        ("LLM-I02", "I", "System prompt leakage (LLM07)", "The system prompt or hidden instructions of {name} are extracted, exposing credentials, internal rules or filter logic.",
+         "Assume the system prompt will leak: no keys, passwords or access rules in it; enforce authorization outside the model."),
+        ("LLM-T03", "T", "Improper output handling (LLM05)", "Output from {name} reaches browsers, shells, SQL, templates or other tools without checks, so injected text becomes XSS, code or query execution.",
+         "Treat model output as untrusted user input: encode it for its sink, validate it against a schema, never pass it to eval, shell or raw SQL."),
     ],
 }
+# Added to an llm component that reads from or writes to a db or storage component (retrieval, memory, embeddings).
+LLM_STORE_THREAT = ("LLM-T02", "T", "Vector and embedding weaknesses (LLM08)",
+                    "Documents or embeddings that {name} retrieves from {stores} carry injected instructions or poisoned facts, or return another tenant's data.",
+                    "Permission-aware retrieval (filter by the caller's tenant and rights), check and tag sources before indexing, keep provenance, limit who can write to the index.")
+
+# LINDDUN privacy threats (opt-in): (rule, letter, title, detail, fix). Letters: L linking, I identifying,
+# N non-repudiation, D detecting, DD data disclosure, U unawareness, NC non-compliance.
+PRIVACY_PROCESS = [
+    ("PRV-DD01", "DD", "Personal data collected or processed beyond the purpose",
+     "{name} takes or keeps more personal data than its purpose needs (extra fields, full records where a flag would do).",
+     "Data minimization: list each field and its purpose, drop or truncate the rest, prefer derived values (age band over birth date)."),
+    ("PRV-U01", "U", "People cannot see or control their data",
+     "Users of {name} are not told what is collected and cannot access, export, correct or delete it.",
+     "Clear notice at collection, consent where it is the legal basis, self-service access, export and deletion that reaches backups and processors."),
+]
+PRIVACY_EXPOSED = ("PRV-D01", "D", "Involvement detectable from the outside",
+                   "Responses or side effects of {name} reveal that a person uses it (account exists messages, timing, notification text, URLs).",
+                   "Uniform responses for signup, login and reset, generic notification text, no personal or sensitive terms in URLs.")
+PRIVACY_STORE = [
+    ("PRV-L01", "L", "Records linkable into profiles",
+     "Personal records in {name} share stable identifiers (email, device id, user id) that let them be joined with other data sets.",
+     "Per-purpose pseudonymous ids, keep data sets separate, restrict joins and exports, minimize retained identifiers."),
+    ("PRV-I01", "I", "People re-identified from pseudonymous data",
+     "Data in {name} described as anonymous or pseudonymous can be tied back to a person (quasi-identifiers, small groups, keys stored alongside).",
+     "Remove direct identifiers, keep re-identification keys apart, aggregate or generalize before analytics and sharing."),
+    ("PRV-NC01", "NC", "No retention limit or legal basis recorded",
+     "Personal data in {name} has no documented purpose, legal basis or deletion date.",
+     "Record it in the processing register, set a retention period, automate deletion, run a DPIA for high-risk processing."),
+]
+PRIVACY_THIRD_PARTY = ("PRV-L02", "L", "Third party can link or profile users",
+                       "{name} receives personal data and can combine it with what it collects elsewhere (analytics, ads, SDKs, AI vendors).",
+                       "Send pseudonymous ids or aggregates, contract limits on secondary use and training, review SDKs, check data transfer rules.")
+PRIVACY_NON_REPUDIATION = ("PRV-N01", "N", "Users cannot deny actions where they need to",
+                           "{name} keeps identity-linked records of sensitive actions (reports, votes, health questions) that could be held against the user.",
+                           "Decide where deniability matters, store only what the purpose needs, separate identity from sensitive content.")
+
 STORE_THREATS = [
     ("STR-T10", "T", "Stored data tampered with", "Someone with write access, or an injection upstream, changes records in {name}.",
      "Least-privilege service accounts, no shared admin credentials, integrity checks or audit tables, tested backups."),
@@ -411,6 +460,14 @@ def element_threats(model, analyses) -> List[Dict[str, Any]]:
                              and model["components"][a["to"]]["kind"] in ("process", "store", "external")]
                     lik = 3 if calls else 1
                 out.append(threat(rule, letter, title, fmt(detail), fix, loc, lik, imp))
+            if c["type"] == "llm":
+                stores = sorted({model["components"][o]["name"] for a in touching
+                                 for o in (a["from"], a["to"]) if o != c["id"]
+                                 and model["components"][o]["type"] in ("db", "storage")})
+                if stores:
+                    rule, letter, title, detail, fix = LLM_STORE_THREAT
+                    out.append(threat(rule, letter, title, detail.format(name=c["name"], stores=", ".join(stores)),
+                                      fix, loc, max(base, 2), imp))
             continue
         # data stores
         for rule, letter, title, detail, fix in STORE_THREATS + STORE_TYPE_THREATS.get(c["type"], []):
@@ -418,6 +475,43 @@ def element_threats(model, analyses) -> List[Dict[str, Any]]:
             if rule == "Q-S01" and any(a["authenticated"] is False for a in inbound):
                 lik = 3
             out.append(threat(rule, letter, title, fmt(detail), fix, loc, lik, imp))
+    return out
+
+
+def privacy_threats(model, analyses) -> List[Dict[str, Any]]:
+    """LINDDUN threats for elements that handle personal data (only when privacy mode is on)."""
+    out = []
+    trust = model["trust"]
+    for c in model["components"].values():
+        touching = [a for a in analyses if a["personal"] and (a["to"] == c["id"] or a["from"] == c["id"])]
+        if not touching:
+            continue
+        level = max(a["data_level"] for a in touching)
+        special = any(d in SPECIAL_DATA for a in touching for d in a["data"])
+        imp = _impact_for(level)
+        loc = f"{c['name']} ({c['type']}, {c['zone']})"
+
+        def add(entry, lik, comp=c, where=loc, impact=imp):
+            rule, letter, title, detail, fix = entry
+            item = threat(rule, "", title, detail.format(name=comp["name"]), fix, where, lik, impact, kind="privacy")
+            item["linddun"] = letter
+            out.append(item)
+
+        if c["kind"] == "external":
+            if c["type"] == "external" and any(a["to"] == c["id"] for a in touching):
+                add(PRIVACY_THIRD_PARTY, 2)
+            continue
+        if c["kind"] == "process":
+            exposed = trust[c["zone"]] == 0 or any(a["to"] == c["id"] and a["from_trust"] == 0 for a in analyses)
+            for entry in PRIVACY_PROCESS:
+                add(entry, 2)
+            if exposed:
+                add(PRIVACY_EXPOSED, 3 if special else 2)
+            if special:
+                add(PRIVACY_NON_REPUDIATION, 2)
+            continue
+        for entry in PRIVACY_STORE:
+            add(entry, 2)
     return out
 
 
@@ -497,6 +591,20 @@ def flags(model, analyses) -> List[Dict[str, Any]]:
             flag("ELEM-002", "high", "Data store in a low-trust zone",
                  f"{c['name']} sits in {c['zone']} (trust {trust[c['zone']]}).",
                  "Move data stores into a private zone reachable only from the services that need them.", loc)
+        if c["type"] == "llm":
+            touching = [a for a in analyses if a["to"] == c["id"] or a["from"] == c["id"]]
+            private = any(a["sensitive"] for a in touching) or any(
+                comps[o]["kind"] == "store" for a in touching for o in (a["from"], a["to"]) if o != c["id"])
+            untrusted = any(a["to"] == c["id"] and (a["from_trust"] == 0 or comps[a["from"]]["kind"] == "external")
+                            for a in analyses)
+            outbound = any(a["from"] == c["id"] and (a["to_trust"] == 0 or comps[a["to"]]["kind"] == "external")
+                           for a in analyses)
+            if private and untrusted and outbound:
+                flag("ELEM-004", "high", "LLM mixes private data, untrusted input and an outbound channel",
+                     f"{c['name']} reads private or sensitive data, takes input from an untrusted source and can send "
+                     "data out. Injected instructions can make it leak that data.",
+                     "Break one leg: no outbound calls or links while private data is in context, human approval for "
+                     "sends, or keep untrusted content away from the agent that holds private data.", loc)
         if not any(a["to"] == c["id"] or a["from"] == c["id"] for a in analyses):
             flag("ELEM-003", "info", "Component has no data flows",
                  f"{c['name']} is not connected to anything in the model.",
@@ -504,17 +612,20 @@ def flags(model, analyses) -> List[Dict[str, Any]]:
     return out
 
 
-def build(model) -> Dict[str, Any]:
+def build(model, privacy: Optional[bool] = None) -> Dict[str, Any]:
     analyses = [analyze_flow(f, model) for f in model["flows"]]
     flagged = flags(model, analyses)
     threats = element_threats(model, analyses) + flow_threats(model, analyses)
-    findings = flagged + threats
+    use_privacy = model.get("privacy", False) if privacy is None else privacy
+    private = privacy_threats(model, analyses) if use_privacy else []
+    findings = flagged + threats + private
     findings.sort(key=lambda f: (-SEVERITY_ORDER.index(f["severity"]), f["kind"] != "flag"))
     by_sev = {s: sum(1 for f in findings if f["severity"] == s) for s in reversed(SEVERITY_ORDER)}
     return {"name": model["name"], "analyses": analyses, "findings": findings, "warnings": model["warnings"],
             "summary": {"components": len(model["components"]), "flows": len(model["flows"]),
                         "boundary_crossings": sum(1 for a in analyses if a["crosses_boundary"]),
-                        "flags": len(flagged), "threats": len(threats), "by_severity": by_sev},
+                        "flags": len(flagged), "threats": len(threats), "privacy_threats": len(private),
+                        "by_severity": by_sev},
             "mermaid": mermaid(model, analyses, flagged)}
 
 
@@ -569,7 +680,9 @@ def render_markdown(result) -> str:
     sev = ", ".join(f"{n} {k}" for k, n in s["by_severity"].items() if n)
     L = [f"# Threat model: {result['name']}", "",
          f"{s['components']} components, {s['flows']} flows, {s['boundary_crossings']} cross a trust boundary. "
-         f"{s['flags']} design flags and {s['threats']} STRIDE threats ({sev or 'none'}).", "",
+         f"{s['flags']} design flags and {s['threats']} STRIDE threats"
+         + (f", {s['privacy_threats']} LINDDUN privacy threats" if s.get("privacy_threats") else "")
+         + f" ({sev or 'none'}).", "",
          "## Data-flow diagram", "", "```mermaid", result["mermaid"], "```", "",
          "Red arrows carry a medium or worse flag below.", "", "## Design flags", ""]
     fl = [f for f in result["findings"] if f["kind"] == "flag"]
@@ -586,6 +699,13 @@ def render_markdown(result) -> str:
             continue
         L.append(f"| {f['severity']} | {f['id']} | {_cell(f['location'])} | {f['stride']} | "
                  f"{_cell(f['title'] + ': ' + f['detail'])} | {f['likelihood']} | {f['impact']} | {_cell(f['fix'])} |")
+    priv = [f for f in result["findings"] if f["kind"] == "privacy"]
+    if priv:
+        L += ["", "## LINDDUN privacy threats", "",
+              "| Severity | ID | Where | LINDDUN | Threat | L | I | Mitigation |", "|---|---|---|---|---|---|---|---|"]
+        L += [f"| {f['severity']} | {f['id']} | {_cell(f['location'])} | {f['linddun']} | "
+              f"{_cell(f['title'] + ': ' + f['detail'])} | {f['likelihood']} | {f['impact']} | {_cell(f['fix'])} |"
+              for f in priv]
     if result["warnings"]:
         L += ["", "## Assumptions", ""] + [f"- {w}" for w in result["warnings"]]
     L += ["", "## Next", "",
@@ -600,6 +720,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--mermaid-only", action="store_true", help="print only the Mermaid diagram")
     ap.add_argument("--output", help="write the Markdown report to this file")
+    ap.add_argument("--privacy", action="store_true",
+                    help="add LINDDUN privacy threats for elements handling personal data (same as privacy: true in the model)")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any flag or threat is at or above this severity (default: high)")
     args = ap.parse_args(argv)
@@ -609,7 +731,7 @@ def main(argv=None) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
-    result = build(model)
+    result = build(model, privacy=True if args.privacy else None)
     if args.json:
         print(json.dumps({k: result[k] for k in ("name", "summary", "warnings", "findings", "mermaid")}
                          | {"flows": result["analyses"]}, indent=2))

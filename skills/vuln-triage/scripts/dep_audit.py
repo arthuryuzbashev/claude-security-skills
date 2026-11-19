@@ -9,7 +9,7 @@ With --online it asks the OSV.dev batch API (one POST, then one GET per vuln id)
 Usage:
   dep_audit.py requirements.txt package-lock.json
   dep_audit.py requirements.txt --osv-results osv.json --prioritize
-  dep_audit.py . --online --kev known_exploited_vulnerabilities.json
+  dep_audit.py . --online --kev known_exploited_vulnerabilities.json --epss epss_scores-current.csv
   dep_audit.py package-lock.json --online --json --fail-on critical
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cvss_calc import score_vector  # noqa: E402  (sibling script in the same skill)
+from ssvc_decide import load_epss, load_kev_catalog  # noqa: E402
 
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
@@ -308,15 +309,17 @@ def fixed_versions(vuln: dict, d: Dict[str, object]) -> List[str]:
 
 
 def vuln_severity(vuln: dict) -> Tuple[str, Optional[float]]:
-    """Severity from a CVSS v3 vector when present, else the advisory's own label, else 'medium' (unrated)."""
+    """Severity from a CVSS v3 or v4 vector when present (highest wins), else the advisory's label, else 'medium'."""
     best: Optional[float] = None
     entries = list(vuln.get("severity", []) or [])
     for aff in vuln.get("affected", []) or []:
         entries += aff.get("severity", []) or []
     for s in entries:
-        if str(s.get("type", "")).startswith("CVSS_V3"):
+        kind = str(s.get("type", ""))
+        if kind.startswith(("CVSS_V3", "CVSS_V4")):
             try:
-                val = float(score_vector(str(s.get("score", "")))["base_score"])  # type: ignore[arg-type]
+                scored = score_vector(str(s.get("score", "")))
+                val = float(scored["base_score" if kind.startswith("CVSS_V3") else "score"])  # type: ignore[arg-type]
             except (ValueError, KeyError):
                 continue
             best = val if best is None else max(best, val)
@@ -399,8 +402,12 @@ def priority(sev: str, kev: bool) -> str:
     return {"high": "P2", "medium": "P3"}.get(sev, "P4")
 
 
-def vuln_findings(deps: List[Dict[str, object]], matches: Dict[int, List[dict]], kev_ids: Set[str]) -> List[Dict[str, object]]:
+def vuln_findings(deps: List[Dict[str, object]], matches: Dict[int, List[dict]], kev_ids: Set[str],
+                  kev_info: Optional[Dict[str, dict]] = None,
+                  epss: Optional[Dict[str, Dict[str, float]]] = None) -> List[Dict[str, object]]:
     out = []
+    kev_info = kev_info or {}
+    epss = epss or {}
     for i, vulns in matches.items():
         d = deps[i]
         seen: Set[str] = set()
@@ -417,14 +424,26 @@ def vuln_findings(deps: List[Dict[str, object]], matches: Dict[int, List[dict]],
             cves = [a for a in [v.get("id")] + aliases if str(a).startswith("CVE-")]
             summary = (v.get("summary") or v.get("details") or "").strip().splitlines()
             detail = (summary[0][:200] if summary else "No summary in the advisory.")
+            extra: Dict[str, object] = {}
             if kev:
                 detail += " Listed as known exploited (KEV)."
+                entry = next((kev_info[c.upper()] for c in cves if c.upper() in kev_info), {})
+                if entry.get("dueDate"):
+                    extra["kev_due_date"] = entry["dueDate"]
+                if entry.get("knownRansomwareCampaignUse"):
+                    extra["kev_ransomware"] = entry["knownRansomwareCampaignUse"]
+                    if entry["knownRansomwareCampaignUse"] == "Known":
+                        detail += " Used in ransomware campaigns."
+            scores = [epss[c.upper()] for c in cves if c.upper() in epss]
+            if scores:
+                best = max(scores, key=lambda e: e["epss"])
+                extra["epss"], extra["epss_percentile"] = best["epss"], best["percentile"]
             fix = f"Upgrade {d['name']} to {fixes[0]} or later." if fixes else \
                 "No fixed version listed. Check the advisory for a workaround, or replace the package."
             out.append(finding("DEP-001", sev, f"{d['name']} {d['version']}: {v.get('id')}", detail, fix,
                                str(d["source"]), package=d["name"], version=d["version"], ecosystem=d["ecosystem"],
                                vuln_id=v.get("id"), aliases=aliases, cves=cves, cvss=cvss, fixed=fixes, kev=kev,
-                               dev=d.get("dev", False), priority=priority(sev, kev)))
+                               dev=d.get("dev", False), priority=priority(sev, kev), **extra))
     return out
 
 
@@ -439,7 +458,8 @@ def offline_matches(deps: List[Dict[str, object]], vulns: List[dict]) -> Dict[in
 
 def sort_findings(findings: List[Dict[str, object]]) -> List[Dict[str, object]]:
     return sorted(findings, key=lambda f: (str(f.get("priority", "P9")), not f.get("kev", False),
-                                           -SEVERITY_ORDER.index(str(f["severity"])), -(f.get("cvss") or 0),
+                                           -SEVERITY_ORDER.index(str(f["severity"])), -float(f.get("epss") or 0),
+                                           -(f.get("cvss") or 0),
                                            bool(f.get("dev")), str(f.get("location", ""))))
 
 
@@ -468,12 +488,13 @@ def render_text(deps, findings, plan, prioritize: bool, mode: str) -> str:
     lines = [f"Dependency audit ({mode}): {len(deps)} dependencies, {len(vulns)} known vulnerabilities, "
              f"{len(findings) - len(vulns)} pinning issue(s)"]
     if prioritize:
-        lines += ["", f"{'PRI':4} {'SEV':8} {'KEV':4} {'CVSS':5} {'PACKAGE':28} {'VULN':22} FIX"]
+        lines += ["", f"{'PRI':4} {'SEV':8} {'KEV':4} {'CVSS':5} {'PACKAGE':28} {'VULN':22} FIX       EPSS"]
         for f in vulns:
             fix = f"{f['fixed'][0]}" if f["fixed"] else "none"
+            ep = f"{float(f['epss']):.3f}" if f.get("epss") is not None else "-"
             lines.append(f"{f['priority']:4} {str(f['severity']):8} {'yes' if f['kev'] else '':4} "
                          f"{(str(f['cvss']) if f['cvss'] is not None else '-'):5} "
-                         f"{(str(f['package']) + ' ' + str(f['version']))[:28]:28} {str(f['vuln_id'])[:22]:22} {fix}")
+                         f"{(str(f['package']) + ' ' + str(f['version']))[:28]:28} {str(f['vuln_id'])[:22]:22} {fix:9} {ep}")
         if plan:
             lines += ["", "Upgrade plan:"]
             for p in plan:
@@ -498,6 +519,7 @@ def main(argv=None) -> int:
     ap.add_argument("--online", action="store_true", help="query the OSV.dev API (sends package names and versions)")
     ap.add_argument("--osv-results", help="saved OSV vulnerability JSON (API objects, osv-scanner output or a list)")
     ap.add_argument("--kev", help="CISA KEV catalog JSON or a text file of CVE ids; matching vulns become P1")
+    ap.add_argument("--epss", help="EPSS scores (daily CSV or saved api.first.org JSON); adds epss keys and ranks by them within a bucket")
     ap.add_argument("--no-dev", action="store_true", help="drop dev dependencies")
     ap.add_argument("--prioritize", action="store_true", help="text output as a ranked table with an upgrade plan")
     ap.add_argument("--timeout", type=float, default=20.0)
@@ -518,7 +540,9 @@ def main(argv=None) -> int:
             deps += d
             findings += f
         deps = dedupe(deps)
-        kev_ids = load_kev(args.kev) if args.kev else set()
+        kev_info = load_kev_catalog(args.kev) if args.kev else {}
+        kev_ids = set(kev_info)
+        epss_map = load_epss(args.epss)[0] if args.epss else {}
         if args.no_dev:
             deps = [d for d in deps if not d.get("dev")]
         if args.online:
@@ -536,7 +560,7 @@ def main(argv=None) -> int:
         print(f"error: OSV query failed: {err}", file=sys.stderr)
         return 2
 
-    findings = sort_findings(vuln_findings(deps, matches, kev_ids) + findings)
+    findings = sort_findings(vuln_findings(deps, matches, kev_ids, kev_info, epss_map) + findings)
     plan = upgrade_plan(findings)
     if args.json:
         print(json.dumps({"mode": mode, "dependencies": len(deps), "findings": findings, "upgrades": plan}, indent=2))

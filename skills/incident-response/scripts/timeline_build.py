@@ -32,10 +32,26 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 TIME_FIELDS = ["@timestamp", "timestamp", "time", "ts", "datetime", "date_time", "eventtime",
                "event_time", "timecreated", "time_created", "_time", "date", "created", "created_at",
-               "time_generated", "timegenerated", "utc_time", "utctime", "start_time", "starttime"]
+               "time_generated", "timegenerated", "utc_time", "utctime", "start_time", "starttime",
+               # identity and SaaS audit logs: Entra ID / Graph, Okta System Log, M365 unified audit, Google Workspace
+               "createddatetime", "activitydatetime", "published", "creationtime", "creationdate", "id.time"]
 HOST_FIELDS = ["host", "hostname", "computer", "computername", "machine", "device", "src", "source_ip",
-               "sourceipaddress", "client_ip", "clientip", "ip", "id.orig_h"]
-MESSAGE_FIELDS = ["message", "msg", "event", "eventname", "description", "action", "activity", "log"]
+               "sourceipaddress", "client_ip", "clientip", "ip", "id.orig_h", "src_ip", "ipaddress", "client.ipaddress"]
+MESSAGE_FIELDS = ["message", "msg", "event", "eventname", "description", "action", "activity", "log",
+                  "displaymessage", "operation", "operationname", "activitydisplayname", "eventtype"]
+
+# Signs that someone tried to remove or stop logging (ATT&CK T1070 Indicator Removal, T1562.008 Disable Cloud Logs).
+TAMPER_PATTERNS = [
+    ("Windows event log cleared", re.compile(r"(?i)\b(?:the audit log was cleared|the \S+ log file was cleared)|"
+                                             r"\b(?:id|eventid|event_id)=(?:1102|104)\b|\bwevtutil(?:\.exe)?\s+cl\b|"
+                                             r"\bclear-eventlog\b")),
+    ("cloud logging stopped or deleted", re.compile(r"\b(?:StopLogging|DeleteTrail|DeleteFlowLogs|DeleteDetector|"
+                                                    r"DisableOrganizationAdminAccount|DeleteSink|DeleteDiagnosticSetting)\b")),
+    ("shell history or local logs wiped", re.compile(r"(?i)\bhistory\s+-c\b|\bunset\s+HISTFILE\b|HISTFILE=/dev/null|"
+                                                     r"\b(?:rm|shred|truncate)\b[^|;]{0,40}/var/log/|"
+                                                     r"\bjournalctl\s+--(?:vacuum|rotate)|\bauditctl\s+(?:-D|-e\s*0)\b|"
+                                                     r"\bsystemctl\s+(?:stop|disable)\s+(?:auditd|rsyslog|syslog)")),
+]
 
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
@@ -322,15 +338,43 @@ def build_timeline(inputs: List[Tuple[str, str]], opts: Dict, start: Optional[da
     return events, skipped
 
 
+def find_gaps(events: List[Dict], minutes: float) -> List[Dict]:
+    """Silences longer than `minutes` inside each source. A busy log that goes quiet can mean it was cleared."""
+    out = []
+    by_source: Dict[str, List[Dict]] = {}
+    for e in events:
+        by_source.setdefault(e["source"], []).append(e)
+    for source, evs in sorted(by_source.items()):
+        for a, b in zip(evs, evs[1:]):
+            gap = (b["epoch"] - a["epoch"]) / 60.0
+            if gap >= minutes:
+                out.append({"source": source, "from": a["time"], "to": b["time"], "minutes": round(gap, 1)})
+    return out
+
+
+def find_tampering(events: List[Dict]) -> List[Dict]:
+    """Events that look like log clearing or logging being switched off."""
+    out = []
+    for e in events:
+        for label, pat in TAMPER_PATTERNS:
+            if pat.search(e["message"]):
+                out.append({"time": e["time"], "source": e["source"], "host": e["host"], "reason": label,
+                            "message": e["message"][:300]})
+                break
+    return out
+
+
 def _md_cell(text: str, limit: int = 220) -> str:
     text = text.replace("|", "\\|").replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def render(events: List[Dict], skipped: Dict[str, int], fmt: str) -> str:
+def render(events: List[Dict], skipped: Dict[str, int], fmt: str, extras: Optional[Dict[str, List[Dict]]] = None) -> str:
+    extras = extras or {}
     if fmt == "json":
-        return json.dumps({"count": len(events), "sources": sorted(skipped), "skipped": skipped,
-                           "events": events}, indent=2)
+        data = {"count": len(events), "sources": sorted(skipped), "skipped": skipped, "events": events}
+        data.update(extras)
+        return json.dumps(data, indent=2)
     if fmt == "csv":
         buf = io.StringIO()
         w = csv.writer(buf)
@@ -343,6 +387,13 @@ def render(events: List[Dict], skipped: Dict[str, int], fmt: str) -> str:
         lines.append(f"| {e['time']} | {_md_cell(e['source'], 40)} | {_md_cell(e['host'], 40)} | {_md_cell(e['message'])} |")
     lines.append("")
     lines.append(f"{len(events)} event(s) from {len(skipped)} source(s)")
+    if "tampering" in extras:
+        lines += ["", f"Possible log tampering: {len(extras['tampering'])}"]
+        lines += [f"- {t['time']} {t['source']} {t['host']}: {t['reason']}: {_md_cell(t['message'], 160)}"
+                  for t in extras["tampering"]]
+    if "gaps" in extras:
+        lines += ["", f"Gaps in a source: {len(extras['gaps'])}"]
+        lines += [f"- {g['source']}: nothing from {g['from']} to {g['to']} ({g['minutes']} min)" for g in extras["gaps"]]
     return "\n".join(lines)
 
 
@@ -371,7 +422,14 @@ def main(argv=None) -> int:
     ap.add_argument("--dayfirst", action="store_true", help="read 4/3/2026 as 4 March, not April 3")
     ap.add_argument("--time-field", help="CSV/JSON field holding the timestamp (default: auto-detect)")
     ap.add_argument("--output", help="write the timeline here instead of stdout")
+    ap.add_argument("--gaps", type=float, metavar="MINUTES",
+                    help="list silences of at least MINUTES inside each source (JSON key 'gaps'; CSV: stderr)")
+    ap.add_argument("--flag-tampering", action="store_true",
+                    help="list events that look like log clearing or logging switched off (JSON key 'tampering'; CSV: stderr)")
     args = ap.parse_args(argv)
+    if args.gaps is not None and args.gaps <= 0:
+        print("error: --gaps must be a positive number of minutes", file=sys.stderr)
+        return 2
 
     try:
         tz = parse_offset(args.tz_offset)
@@ -395,7 +453,17 @@ def main(argv=None) -> int:
         if count:
             print(f"note: {name}: {count} line(s) without a readable timestamp were skipped", file=sys.stderr)
 
-    out = render(events, skipped, args.format)
+    extras: Dict[str, List[Dict]] = {}
+    if args.flag_tampering:
+        extras["tampering"] = find_tampering(events)
+    if args.gaps is not None:
+        extras["gaps"] = find_gaps(events, args.gaps)
+    if args.format == "csv":
+        for t in extras.get("tampering", []):
+            print(f"tampering: {t['time']} {t['source']}: {t['reason']}", file=sys.stderr)
+        for g in extras.get("gaps", []):
+            print(f"gap: {g['source']} {g['from']} .. {g['to']} ({g['minutes']} min)", file=sys.stderr)
+    out = render(events, skipped, args.format, extras)
     if args.output:
         Path(args.output).write_text(out + "\n", encoding="utf-8")
         print(f"wrote {len(events)} event(s) to {args.output}", file=sys.stderr)

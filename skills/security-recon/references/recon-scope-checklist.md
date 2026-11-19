@@ -33,6 +33,16 @@ CT logs keep names forever. A name in CT with no DNS answer today is usually ret
 5. Email authentication gaps (spoofing of the main domain hurts customers directly)
 6. Everything else goes into the inventory for the next review
 
+## Domain posture records (domain_posture.py)
+
+| Record | Standard | Good state |
+|---|---|---|
+| `/.well-known/security.txt` | RFC 9116 | `Contact:` (mailto: or https:) and one `Expires:` less than a year ahead; optional `Policy`, `Encryption`, `Canonical`, PGP signature |
+| CAA | RFC 8659 | `0 issue "<your CA>"` for each CA you use, `0 issuewild ";"` if you have no wildcards, `0 iodef "mailto:..."` |
+| DS at the parent | RFC 4033 to 4035 | Present: the zone is DNSSEC-signed. Check with `dig +short DS example.com` |
+
+CAA and DS are inherited: a host uses the CAA of its closest ancestor that has one, and the DS of its zone.
+
 ## Verifying a takeover candidate (your own domain)
 
 - `dig CNAME host.example.com` and `dig A <target>`: the target returns NXDOMAIN or no address

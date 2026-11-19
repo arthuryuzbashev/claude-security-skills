@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Audit GitHub Actions workflows for supply-chain and injection risks.
 
-Checks unpinned actions, pull_request_target with PR checkout, script
-injection through untrusted ${{ }} contexts, token permissions,
-self-hosted runners on PR triggers and leaked secrets. Offline only.
+Checks unpinned and previously compromised actions, pull_request_target with
+PR checkout (and the ways around the actions/checkout v7 guard), script
+injection through untrusted ${{ }} contexts, GITHUB_ENV writes, token
+permissions, inherited secrets, artifact poisoning, self-hosted runners on PR
+triggers, leaked or hard-coded credentials and Shai-Hulud worm traces. Offline only.
 
 Usage:
   ci_audit.py .                              # finds .github/workflows/*.yml
@@ -32,7 +34,17 @@ UNTRUSTED_CONTEXT = re.compile(
     r"|inputs\.[A-Za-z0-9_-]+")
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 PR_TRIGGERS = {"pull_request", "pull_request_target", "issue_comment", "pull_request_review",
-               "pull_request_review_comment", "discussion_comment", "issues"}
+               "pull_request_review_comment", "discussion", "discussion_comment", "issues"}
+# Triggers that run with secrets and a write token while reacting to outside input.
+PRIVILEGED_TRIGGERS = {"pull_request_target", "workflow_run", "issue_comment"}
+# Actions whose tags were repointed to malicious code (CISA KEV: CVE-2025-30066, CVE-2025-30154).
+COMPROMISED_ACTIONS = {
+    "tj-actions/changed-files": "CVE-2025-30066, March 2025: every tag was repointed to a commit that dumped runner memory (secrets) into the build log",
+    "reviewdog/action-setup": "CVE-2025-30154, 2025-03-11: the v1 tag served code that dumped secrets into the build log",
+}
+COMPROMISED_SHA_PREFIXES = ("0e58ed8",)  # the malicious tj-actions/changed-files commit
+REVIEWDOG_V1_USERS = {"reviewdog/action-shellcheck", "reviewdog/action-composite-template", "reviewdog/action-staticcheck",
+                      "reviewdog/action-ast-grep", "reviewdog/action-typos"}
 TRUSTED_OWNERS = {"actions", "github"}
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -466,6 +478,8 @@ def audit_workflow(doc: Any, path: str) -> List[Dict[str, str]]:
                                    "Use GitHub-hosted runners for PR jobs, or ephemeral, isolated self-hosted runners with 'Require approval for all outside collaborators'.",
                                    f"{path}:{line_of(job, 'runs-on')}"))
 
+    out += _extra_checks(doc, path, trig, jobs)
+
     env_sources = [doc.get("env")] + [j.get("env") for j in jobs.values() if isinstance(j, dict)] + \
                   [s.get("env") for _, _, s in _steps(doc)]
     for env in env_sources:
@@ -474,6 +488,94 @@ def audit_workflow(doc: Any, path: str) -> List[Dict[str, str]]:
                                "Re-enables the deprecated set-env/add-path log commands, which let anything printed to the log change the environment.",
                                "Remove it and write to $GITHUB_ENV / $GITHUB_PATH instead.",
                                f"{path}:{line_of(env, 'ACTIONS_ALLOW_UNSECURE_COMMANDS')}"))
+    return out
+
+
+def _extra_checks(doc: Any, path: str, trig: set, jobs: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Checks added in 2026: unsafe checkout escapes, GITHUB_ENV writes, inherited secrets, artifact
+    poisoning, known-compromised actions, container credentials, plain-http downloads, worm IoCs."""
+    out: List[Dict[str, str]] = []
+    hot = trig & PRIVILEGED_TRIGGERS
+    base = os.path.basename(path).lower()
+    if "shai-hulud" in base or "sha1-hulud" in base:
+        out.append(finding("GHA-045", "critical", f"Workflow file name matches the Shai-Hulud worm: {base}",
+                           "The 2025 Shai-Hulud npm worm pushed .github/workflows/shai-hulud-workflow.yml to repositories it reached, to send their secrets out.",
+                           "Treat the repo and every token the author had as compromised: delete the file and the shai-hulud branch, rotate npm, GitHub and cloud credentials, follow the CISA alert of 2025-09-23.",
+                           f"{path}:1"))
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        runs_on = job.get("runs-on")
+        labels = [str(x) for x in runs_on] if isinstance(runs_on, list) else [str(runs_on or "")]
+        if any("sha1hulud" in l.lower().replace("-", "") for l in labels):
+            out.append(finding("GHA-045", "critical", f"job {job_id}: runner label SHA1HULUD",
+                               "Shai-Hulud 2.0 (November 2025) registered a self-hosted runner named SHA1HULUD on infected machines and drove it from a discussion-triggered workflow.",
+                               "Remove the workflow, deregister the runner in Settings, Actions, Runners, wipe the host and rotate every credential it held.",
+                               f"{path}:{line_of(job, 'runs-on')}"))
+        if isinstance(job.get("uses"), str) and str(job.get("secrets", "")).strip() == "inherit":
+            out.append(finding("GHA-022", "medium", f"job {job_id}: secrets: inherit",
+                               f"Every repository and organization secret is passed to the reusable workflow {job['uses']}, not only the ones it needs.",
+                               "List the secrets explicitly under secrets: so the called workflow gets the minimum.",
+                               f"{path}:{line_of(job, 'secrets')}"))
+        services = job.get("services") if isinstance(job.get("services"), dict) else {}
+        for where, cont in [("container", job.get("container"))] + [(f"services.{k}", v) for k, v in services.items()]:
+            creds = cont.get("credentials") if isinstance(cont, dict) else None
+            pw = creds.get("password") if isinstance(creds, dict) else None
+            if isinstance(pw, str) and pw.strip() and "${{" not in pw:
+                out.append(finding("GHA-043", "high", f"job {job_id}: hard-coded registry password in {where}",
+                                   "The container registry password sits in the workflow file in plain text, readable by anyone with repo read access and kept in git history.",
+                                   "Use password: ${{ secrets.REGISTRY_PASSWORD }} (or GITHUB_TOKEN for ghcr.io) and rotate the exposed password.",
+                                   f"{path}:{line_of(creds, 'password')}"))
+
+    for job_id, job, step in _steps(doc):
+        uses = str(step.get("uses", "")).strip()
+        with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+        loc = f"{path}:{line_of(step, 'uses') if uses else getattr(step, 'line', 0)}"
+        if uses.startswith("actions/checkout") and ytrue(with_.get("allow-unsafe-pr-checkout")):
+            out.append(finding("GHA-004", "critical" if hot else "high", "allow-unsafe-pr-checkout: true",
+                               "actions/checkout v7 (and the July 2026 backports v6.1.0, v5.1.0, v4.4.0) refuses to check out fork PR code under pull_request_target and workflow_run. This input switches that guard off.",
+                               "Remove it. Build PR code in a pull_request workflow and pass results through artifacts that the privileged workflow only reads.",
+                               f"{path}:{line_of(with_, 'allow-unsafe-pr-checkout')}"))
+        if "issue_comment" in trig and "pull_request_target" not in trig and "workflow_run" not in trig and uses.startswith("actions/checkout"):
+            ref = str(with_.get("ref", ""))
+            if re.search(r"refs/pull/|pull_request\.head|head_ref|\.head\.(sha|ref)", ref):
+                out.append(finding("GHA-005", "high", "issue_comment workflow checks out PR code",
+                                   f"job {job_id} checks out '{ref}' from a comment-triggered workflow, which runs with secrets and a write token. The checkout v7 guard does not cover issue_comment.",
+                                   "Check the commenter's permission first, then build PR code in an unprivileged pull_request workflow instead.",
+                                   f"{path}:{line_of(step, 'with')}"))
+        name = uses.partition("@")[0].lower()
+        version = uses.partition("@")[2]
+        if name in COMPROMISED_ACTIONS or name in REVIEWDOG_V1_USERS:
+            bad_sha = version.startswith(COMPROMISED_SHA_PREFIXES)
+            if bad_sha or not FULL_SHA.match(version):
+                why = COMPROMISED_ACTIONS.get(name, "uses reviewdog/action-setup@v1, which was compromised on 2025-03-11 (CVE-2025-30154)")
+                out.append(finding("GHA-042", "critical" if bad_sha else "high", f"Previously compromised action: {uses}",
+                                   f"{why}. A tag ref keeps trusting whoever controls it." + (" This SHA is the malicious commit." if bad_sha else ""),
+                                   "Pin a reviewed SHA from after the fix (or replace the action), then check old run logs from March 2025 for leaked secrets and rotate them.",
+                                   loc))
+        if hot and "workflow_run" in trig and re.search(r"(download-artifact|action-download-artifact)", uses):
+            out.append(finding("GHA-032", "medium", "workflow_run downloads artifacts from another run",
+                               "Artifacts from a PR build are attacker-controlled. Unzipping them over the workspace or running anything from them gives that code this workflow's token and secrets.",
+                               "Download to ${{ runner.temp }}, treat the content as data (validate it), never execute it or source it into GITHUB_ENV.",
+                               loc))
+        if "run" in step:
+            body = step["run"]
+            text = str(body)
+            if hot:
+                for m in re.finditer(r">>\s*[\"']?\$\{?GITHUB_(ENV|PATH)\b", text):
+                    out.append(finding("GHA-011", "high", f"Write to GITHUB_{m.group(1)} in a privileged workflow",
+                                       f"Under {', '.join(sorted(hot))}, values written to GITHUB_{m.group(1)} can come from the PR or comment and then control later steps (LD_PRELOAD, NODE_OPTIONS, PATH).",
+                                       "Use step outputs ($GITHUB_OUTPUT) instead, or write only constant names with validated values.",
+                                       f"{path}:{_block_line(body, m.start())}"))
+                for m in re.finditer(r"\bgh\s+pr\s+checkout\b|\bgit\s+fetch\b[^\n]*\bpull/|refs/pull/\S*/(head|merge)", text):
+                    out.append(finding("GHA-005", "high", "PR code fetched by a shell command in a privileged workflow",
+                                       f"job {job_id} pulls PR code with git or gh under {', '.join(sorted(hot))}. The actions/checkout v7 guard does not cover these commands.",
+                                       "Do not fetch PR heads in privileged workflows; build PR code in a pull_request workflow.",
+                                       f"{path}:{_block_line(body, m.start())}"))
+            for m in re.finditer(r"(?i)\b(curl|wget|Invoke-WebRequest|iwr)\b[^\n]*\bhttp://(?!localhost|127\.0\.0\.1)", text):
+                out.append(finding("GHA-044", "medium", "Download over plain http",
+                                   "Anyone on the network path can swap the file, and it runs with the job's token.",
+                                   "Use https and verify a pinned checksum.", f"{path}:{_block_line(body, m.start())}"))
     return out
 
 

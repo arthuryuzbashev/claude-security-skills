@@ -83,6 +83,34 @@ class RegisterCheckTests(unittest.TestCase):
         risks, _ = register("R1,X,,5,5,none,,,,,closed")
         self.assertEqual(rr.check(risks, TODAY), [])
 
+    def test_acceptance_expired(self):
+        head = "id,title,owner,likelihood,impact,treatment,next_review,accepted_until\n"
+        risks, errors = rr.load_register(head + "R1,X,Ann,4,4,accept,2027-01-01,2026-06-30\n")
+        self.assertEqual(errors, [])
+        self.assertIn("RR-008", ids(rr.check(risks, TODAY)))
+        risks, _ = rr.load_register(head + "R1,X,Ann,4,4,accept,2027-01-01,2027-06-30\n")
+        self.assertNotIn("RR-008", ids(rr.check(risks, TODAY)))
+        risks, _ = rr.load_register(head.replace("accepted_until", "acceptance_expiry") + "R1,X,Ann,4,4,accept,2027-01-01,2026-06-30\n")
+        self.assertIn("RR-008", ids(rr.check(risks, TODAY)), "alias column name")
+
+    def test_duplicate_ids(self):
+        risks, _ = register("R1,X,Ann,2,2,,,mitigate,,2027-01-01,open", "R1,Y,Ann,2,2,,,mitigate,,2027-01-01,closed")
+        self.assertIn("RR-009", ids(rr.check(risks, TODAY)), "closed duplicates still clash")
+        risks, _ = register("R1,X,Ann,2,2,,,mitigate,,2027-01-01,open", "R2,Y,Ann,2,2,,,mitigate,,2027-01-01,open")
+        self.assertNotIn("RR-009", ids(rr.check(risks, TODAY)))
+
+    def test_treatment_overdue(self):
+        head = "id,title,owner,likelihood,impact,treatment,next_review,target_date,status\n"
+        risks, _ = rr.load_register(head + "R1,X,Ann,4,4,mitigate,2027-01-01,2026-09-30,open\n")
+        f = [x for x in rr.check(risks, TODAY) if x["id"] == "RR-010"]
+        self.assertEqual(f[0]["severity"], "medium")
+        risks, _ = rr.load_register(head + "R1,X,Ann,4,4,mitigate,2027-01-01,2026-12-31,open\n")
+        self.assertNotIn("RR-010", ids(rr.check(risks, TODAY)))
+        risks, _ = rr.load_register(head + "R1,X,Ann,4,4,mitigate,2027-01-01,2026-09-30,closed\n")
+        self.assertNotIn("RR-010", ids(rr.check(risks, TODAY)))
+        _, errors = rr.load_register(head + "R1,X,Ann,4,4,mitigate,2027-01-01,soon,open\n")
+        self.assertTrue(errors, "bad date is a row error")
+
     def test_heat_map_counts(self):
         risks, _ = register("R1,X,Ann,4,5,none,,mitigate,,2027-01-01,open", "R2,Y,Ann,4,5,none,,mitigate,,2027-01-01,open")
         grid = rr.heat_map(risks, "inherent")
@@ -163,6 +191,23 @@ class ControlGapTests(unittest.TestCase):
                 self.assertRegex(ref, r"^[5-8]\.\d{1,2}$", c["key"])
             for ref in c["soc2"]:
                 self.assertTrue(re.match(r"^(CC[1-9]\.\d|A1\.[1-3]|C1\.[12]|PI1\.[1-5]|P[1-8]\.\d)$", ref), (c["key"], ref))
+            for ref in c["nis2"]:
+                self.assertRegex(ref, r"^Art\.(20|23|21\(2\)\([a-j]\))$", c["key"])
+
+    def test_corrected_iso_mappings(self):
+        self.assertEqual(cg.BY_KEY["management_oversight"]["iso"], [], "5.35 is independent review, not management review")
+        self.assertIn("8.8", cg.BY_KEY["security_testing"]["iso"])
+
+    def test_new_controls_and_nis2_coverage(self):
+        self.assertEqual(cg.BY_KEY["incident_notification"]["code"], "CTL-38")
+        self.assertEqual(cg.BY_KEY["software_supply_chain"]["code"], "CTL-40")
+        self.assertEqual(cg.BY_CODE["ctl-01"]["key"], "mfa", "old codes keep their numbers")
+        r = cg.assess({"incident_notification": {"answer": "no", "note": ""}}, include_unanswered=False)
+        self.assertIn("Art.23", r["coverage"]["nis2"]["none"])
+        self.assertIn("NIS2 Art.23", r["findings"][0]["mappings"])
+        r = cg.assess({"incident_notification": {"answer": "yes", "note": ""}}, include_unanswered=False)
+        self.assertEqual(r["findings"], [])
+        self.assertEqual(r["coverage"]["nis2"]["coverage_pct"], 100.0)
 
 
 class ControlGapCliTests(unittest.TestCase):
@@ -171,7 +216,8 @@ class ControlGapCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         d = json.loads(out)
         self.assertEqual(set(d), {"disclaimer", "controls", "answers", "coverage", "findings", "warnings"})
-        self.assertEqual(set(d["coverage"]), {"csf", "iso", "soc2"})
+        self.assertTrue({"csf", "iso", "soc2"} <= set(d["coverage"]), "original keys stay")
+        self.assertIn("nis2", d["coverage"])
         self.assertIn("not audit advice", d["disclaimer"])
         self.assertEqual(d["answers"]["unanswered"], 0)
 

@@ -4,17 +4,20 @@ A short operating guide. Read it at the start of an incident and again before cl
 
 ## Phases
 
-NIST SP 800-61 Rev. 2 describes the classic lifecycle: Preparation, Detection and Analysis, Containment / Eradication / Recovery, Post-Incident Activity. Rev. 3 (2025) maps the same work onto the CSF 2.0 functions (Govern, Identify, Protect, Detect, Respond, Recover). In practice:
+NIST SP 800-61 Rev. 3 (April 3, 2025, "Incident Response Recommendations and Considerations for Cybersecurity Risk Management: A CSF 2.0 Community Profile") replaced Rev. 2 (2012). It drops the old four-phase lifecycle as the main model and places incident response inside the six CSF 2.0 Functions: Govern, Identify and Protect are the preparation around incidents, Detect, Respond and Recover are the incident itself, and lessons learned feed back into Identify (Improvement). Many teams and templates still use the Rev. 2 phases, so both views are below.
 
-| Phase | Goal | Done when |
-|---|---|---|
-| Detect and triage | Decide if it is an incident and how bad | Type, severity and lead are set |
-| Preserve | Keep the evidence | Volatile data collected and hashed, logs exported |
-| Scope | Know every host, account and data set involved | Timeline from patient zero, list of IOCs |
-| Contain | Stop the damage | Attacker access cut, spread stopped |
-| Eradicate | Remove every foothold | Hosts rebuilt, persistence removed, credentials rotated |
-| Recover | Back to normal, safely | Services restored from known-good, monitoring in place |
-| Learn | Not again | Report written, fixes have owners and dates |
+| Working phase | Goal | Done when | Rev. 2 phase | CSF 2.0 |
+|---|---|---|---|---|
+| Prepare | Plans, contacts, logging and backups ready before anything happens | Roles, runbooks and log retention agreed and tested | Preparation | GV, ID, PR |
+| Detect and triage | Decide if it is an incident and how bad | Type, severity and lead are set | Detection and Analysis | DE (DE.AE), RS.MA |
+| Preserve | Keep the evidence | Volatile data collected and hashed, logs exported | Detection and Analysis | RS.AN |
+| Scope | Know every host, account and data set involved | Timeline from patient zero, list of IOCs | Detection and Analysis | RS.AN |
+| Contain | Stop the damage | Attacker access cut, spread stopped | Containment, Eradication and Recovery | RS.MI |
+| Eradicate | Remove every foothold | Hosts rebuilt, persistence removed, credentials rotated | Containment, Eradication and Recovery | RS.MI |
+| Recover | Back to normal, safely | Services restored from known-good, monitoring in place | Containment, Eradication and Recovery | RC.RP, RC.CO |
+| Learn | Not again | Report written, fixes have owners and dates | Post-Incident Activity | ID.IM, GV |
+
+Reporting and communication (RS.CO) run through every phase, not only at the end. Tag each follow-up in the report with its CSF Function so it lands with the team that owns that area.
 
 ## Severity levels
 
@@ -62,6 +65,8 @@ Raise the level as soon as scope grows. Never lower it before scope is confirmed
 | NIS2 (EU, essential/important entities) | CSIRT or competent authority, significant incident | Early warning 24 h, notification 72 h, final report 1 month |
 | SEC Form 8-K Item 1.05 (US public companies) | Investors | 4 business days after determining the incident is material |
 | HIPAA Breach Notification Rule (US) | Affected individuals | Without unreasonable delay, no later than 60 days after discovery |
+| DORA (EU financial entities, Delegated Regulation (EU) 2025/301) | Competent authority, major ICT-related incident | Initial report within 4 h of classifying it as major and no later than 24 h after becoming aware; intermediate within 72 h of the initial report; final within 1 month of the latest intermediate report |
+| CIRCIA (US critical infrastructure) | CISA | Not in force yet: reporting is required only once CISA's final rule takes effect (the rule was still in federal review in October 2026). The proposed rule uses 72 h for covered incidents and 24 h for ransom payments; check cisa.gov/circia |
 
 Contracts (customers, payment processors, cyber insurance) often add shorter deadlines. Check them on day one.
 

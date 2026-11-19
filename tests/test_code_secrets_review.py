@@ -40,6 +40,40 @@ class SecretRuleTests(unittest.TestCase):
         for rid, line in cases.items():
             self.assertIn(rid, ids(self.scan(line)), rid)
 
+    # Newer provider shapes (gitleaks default config). Each has a near miss that must stay quiet.
+    NEW_PROVIDERS = {
+        "SEC-013": (fake("sk-" + "ant-api03-", ("FAKE_example-" * 8)[:93] + "AA"), fake("sk-" + "ant-api03-", "short")),
+        "SEC-014": (fake("sk-" + "proj-", "FAKEfake" * 3 + "T3Blbk" + "FJ" + "FAKEfake" * 3), "sk-proj-FAKEfakeFAKEfake"),
+        "SEC-015": (fake("gl" + "pat-", "FAKEfakeFAKEfakeFAKE"), "glpat-short"),
+        "SEC-016": (fake("h" + "f_", "FAKEfake" * 4 + "Ab"), fake("h" + "f_", "FAKE1234")),
+        "SEC-017": (fake("shp" + "at_", "0123456789abcdef" * 2), fake("shp" + "at_", "nothex")),
+        "SEC-018": (fake("do" + "p_v1_", "0123456789abcdef" * 4), fake("do" + "p_v1_", "0123")),
+        "SEC-019": (fake("da" + "pi", "0123456789abcdef" * 2), "dapifake"),
+        "SEC-040": (fake("py" + "pi-AgEIcHlwaS5vcmc", "FAKE_fake-" * 6), "pypi-FAKEFAKE"),
+        "SEC-041": ('secret = "' + fake("abc" + "8Q~", "FAKEfake" * 4) + '"', 'v = "abcQ~FAKE"'),
+        "SEC-042": (fake("hv" + "s.", "FAKEfake" * 12), fake("hv" + "s.", "FAKEfake")),
+        "SEC-043": (fake("abcdefghijklmn" + ".atlas" + "v1.", "fakefake" * 8), "x.atlasv1.y"),
+        "SEC-044": (fake("123456789:" + "A", "FAKEfake" * 4 + "Zz"), "12:30:45"),
+        "SEC-045": (fake("AGE-SECRET-" + "KEY-1", "QPZRY9X8GF" * 5 + "QPZRY9X8"), "AGE-SECRET-KEY-1FAKE"),
+        "SEC-046": (fake("PM" + "AK-", "0123456789abcdef01234567-" + "0123456789abcdef" * 2 + "01"), "PMAK-FAKE"),
+        "SEC-047": (fake("sntr" + "yu_", "0123456789abcdef" * 4), "sntryu_fake"),
+        "SEC-048": (fake("gl" + "sa_", "FAKEfake" * 4 + "_0123abcd"), "glsa_FAKE"),
+        "SEC-049": (fake("lin_" + "api_", "FAKEfake" * 5), "lin_api_FAKE"),
+        "SEC-050": (fake("dp." + "pt.", "FAKEfake" * 5 + "abc"), "dp.pt.FAKE"),
+        "SEC-051": ("ey" + "JhbGciOiJIUzI1NiJ9.ey" + "JzdWIiOiJmYWtlIn0.FAKEsignatureFAKE", "eyJhbGciOiJIUzI1NiJ9"),
+        "SEC-004": (fake("xa" + "pp-1-", "AFAKE123-1234567890-abcdef0123"), "xapp-FAKE"),
+    }
+
+    def test_new_provider_tokens(self):
+        for rid, (hit, miss) in self.NEW_PROVIDERS.items():
+            self.assertIn(rid, ids(self.scan("value = " + hit)), rid)
+            self.assertNotIn(rid, ids(self.scan("value = " + miss)), rid + " near miss")
+
+    def test_new_provider_values_are_masked(self):
+        for rid, (hit, _) in self.NEW_PROVIDERS.items():
+            for f in self.scan("value = " + hit):
+                self.assertNotIn(hit, json.dumps(f), rid)
+
     def test_aws_example_key_is_info(self):
         f = self.scan('k = "AKIAIOSFODNN7EXAMPLE"')
         self.assertEqual(f[0]["severity"], "info")
@@ -105,6 +139,27 @@ class SecretScanRepoTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_credential_files(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            files = {
+                "id_ed25519": "not a real key\n",
+                "id_ed25519.pub": "ssh-ed25519 FAKE\n",
+                "infra/terraform.tfstate": "{}\n",
+                ".npmrc": "//registry.npmjs.org/:_authToken=FAKEfakeFAKEfake1234\n",
+                "pkg/.npmrc": "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n",
+                "notes.txt": "nothing here\n",
+            }
+            for rel, body in files.items():
+                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+                with open(os.path.join(tmp, rel), "w") as fh:
+                    fh.write(body)
+            findings, _ = sec.scan_path(tmp)
+            locs = {f["location"] for f in findings if f["id"] == "SEC-031"}
+            self.assertEqual(locs, {"id_ed25519", "infra/terraform.tfstate", ".npmrc"})
+        finally:
+            shutil.rmtree(tmp)
+
     def test_cli_json_exit_codes(self):
         code, out, _ = call_main(sec, [REPO, "--json"])
         self.assertEqual(code, 1)
@@ -138,6 +193,8 @@ class SastTests(unittest.TestCase):
         ("py", "PY-007"): "app.run(debug=True)",
         ("py", "PY-008"): "h = hashlib.md5(data)",
         ("py", "PY-009"): "name = tempfile.mktemp()",
+        ("py", "PY-010"): "claims = jwt.decode(tok, options={\"verify_signature\": False})",
+        ("py", "PY-011"): "reset_token = ''.join(random.choice(chars) for _ in range(20))",
         ("js", "JS-001"): "const r = eval(input);",
         ("js", "JS-002"): "exec(`rm ${path}`);",
         ("js", "JS-003"): "el.innerHTML = msg;",
@@ -145,6 +202,8 @@ class SastTests(unittest.TestCase):
         ("js", "JS-005"): "db.query(`SELECT * FROM t WHERE id = ${id}`);",
         ("js", "JS-006"): "crypto.createHash('sha1')",
         ("js", "JS-007"): "https.request({ rejectUnauthorized: false })",
+        ("js", "JS-008"): "jwt.verify(t, key, { algorithms: ['HS256', 'none'] })",
+        ("js", "JS-009"): "const sessionId = Math.random().toString(36).slice(2);",
         ("php", "PHP-001"): "eval($code);",
         ("php", "PHP-002"): "shell_exec($cmd);",
         ("php", "PHP-003"): "$o = unserialize($raw);",
@@ -162,9 +221,13 @@ class SastTests(unittest.TestCase):
         "py": ["x = ast.literal_eval(s)", "subprocess.run(['ls', p])", "cfg = yaml.safe_load(t)",
                "cfg = yaml.load(t, Loader=yaml.SafeLoader)", "cur.execute(\"SELECT * FROM t WHERE id = %s\", (uid,))",
                "h = hashlib.md5(data, usedforsecurity=False)", "# eval(x) in a comment", "x = eval(user)  # secskills:ignore",
-               "h = hashlib.sha256(data)"],
+               "h = hashlib.sha256(data)",
+               "claims = jwt.decode(tok, key, algorithms=['RS256'], audience='api')",
+               "reset_token = secrets.token_urlsafe(32)", "delay = random.random() * 2"],
         "js": ["el.textContent = msg;", "execFile('ls', [p]);", "db.query('SELECT * FROM t WHERE id = $1', [id]);",
-               "// el.innerHTML = x", "crypto.createHash('sha256')", "if (el.innerHTML === '') {}"],
+               "// el.innerHTML = x", "crypto.createHash('sha256')", "if (el.innerHTML === '') {}",
+               "jwt.verify(t, key, { algorithms: ['RS256'] })", "const jitter = Math.random() * 100;",
+               "const sessionId = crypto.randomUUID();"],
         "php": ["echo htmlspecialchars($_GET['q'], ENT_QUOTES, 'UTF-8');", "$h = hash('sha256', $x);",
                 "$o = unserialize($raw, ['allowed_classes' => false]);", "$s->exec($q);"],
         "go": ["exec.Command(\"ls\", dir)", "h := sha256.New()", "db.Query(\"SELECT * FROM t WHERE id = ?\", id)"],

@@ -1,6 +1,6 @@
 ---
 name: threat-modeling
-description: Threat modeling for software designs with STRIDE. Turns a short system description (components such as web, api, db, queue, storage, mobile, llm, users and third parties, trust zones, and data flows with protocol, auth and data class) into STRIDE threats per element and per trust-boundary crossing, with default likelihood, impact and mitigations, flags for unauthenticated flows, plaintext sensitive data and missing logging, a markdown threat table and a Mermaid data-flow diagram with trust boundaries. Also diffs two versions of a design to list new flows and boundary crossings that need review. Use whenever someone mentions threat model, STRIDE, data flow diagram, DFD, trust boundary, attack surface, security design review, architecture review, "what could go wrong", "is this design secure", a new integration, webhook, AI agent or LLM feature, or wants security sign-off before building.
+description: Threat modeling for software designs with STRIDE, plus opt-in LINDDUN privacy threats. Turns a short system description (components such as web, api, db, queue, storage, mobile, llm, users and third parties, trust zones, data flows with protocol, auth and data class) into STRIDE threats per element and per trust-boundary crossing with default likelihood, impact and mitigations, OWASP LLM Top 10 2025 threats for LLM components, design flags (unauthenticated flows, plaintext sensitive data, missing logging, an LLM mixing private data, untrusted input and an outbound channel), a markdown threat table and a Mermaid data-flow diagram. Also diffs two design versions to list new flows to review. Use when someone mentions a threat model, STRIDE, LINDDUN, PASTA, privacy or DPIA input, data flow diagram, trust boundary, attack surface, security design or architecture review, "what could go wrong", a new integration or webhook, an AI agent, RAG or LLM feature, or wants security sign-off before building.
 ---
 
 # Threat modeling
@@ -25,9 +25,20 @@ Find design flaws before they are code. Describe the system in a small file, gen
 
 ## Workflow
 
+Copy this checklist and tick it off:
+
+```
+- [ ] Scope agreed (one feature or service)
+- [ ] Model file written, flows have protocol, auth and data
+- [ ] stride_model.py run (add --privacy when personal data flows), "not stated" flags fixed, re-run
+- [ ] Session held on the four questions, business logic threats added
+- [ ] Every flag and high threat has a state and an owner
+- [ ] Model saved next to the code; model_diff.py on the next change
+```
+
 1. Scope: one feature or service. Agree it with the tech lead
 2. Write the model file (template in `references/session-guide.md`, examples in `examples/`). Components, zones with trust 0-3, flows with protocol, auth and data
-3. Run `stride_model.py model.yaml --output threat-model.md --fail-on never`
+3. Run `stride_model.py model.yaml --output threat-model.md --fail-on never` (add `--privacy` when personal data flows)
 4. Fix the model where the flags say "not stated" and re-run
 5. Run the session on the four questions (`references/session-guide.md`): confirm the diagram, walk flags then threats by severity, add business logic threats the catalog cannot know
 6. Give every flag and high threat a state: mitigated, to do (owner, date), accepted (who), not applicable (why)
@@ -44,22 +55,25 @@ python3 scripts/stride_model.py examples/checkout_v2.yaml
 python3 scripts/stride_model.py examples/checkout_v2.yaml --output threat-model.md --fail-on never
 python3 scripts/stride_model.py examples/checkout_v2.yaml --mermaid-only > dfd.mmd
 python3 scripts/stride_model.py examples/minimal.json --json
+python3 scripts/stride_model.py examples/checkout_v2.yaml --privacy        # add LINDDUN privacy threats
 cat model.yaml | python3 scripts/stride_model.py -
 ```
 
 Model format:
 
+- `privacy: true` (optional) turns on the LINDDUN threats, same as `--privacy`
 - `zones`: `name: trust` (0 internet or third party, 1 dmz or partner, 2 internal, 3 restricted data). Common names (internet, dmz, internal, data...) get a default; unknown names get 2 with a warning
 - `components`: `id`, `type` (user, external, web, api, mobile, llm, service, db, storage, queue), `zone`, optional `name`, `logging: yes|no`
-- `flows`: `from`, `to`, optional `id`, `protocol`, `auth` (`none` = unauthenticated, missing = unknown), `encrypted: yes|no` (otherwise read from the protocol), `data` (one label or a list: public, internal, confidential, pii, personal, financial, secrets, credentials, payment, pci, phi, health)
+- `flows`: `from`, `to`, optional `id`, `protocol`, `auth` (`none` = unauthenticated, missing = unknown), `encrypted: yes|no` (otherwise read from the protocol), `data` (one label or a list: public, internal, confidential, pii, personal, financial, location, secrets, credentials, payment, pci, phi, health, biometric, genetic)
 
-Element threats follow STRIDE-per-element (external S R, process S T R I D E, store T I D) plus type-specific ones (web XSS and CSRF, API object-level authorization, mobile, LLM prompt injection, disclosure, excessive agency and cost, storage, queue). Flows that cross a zone get T I D.
-Design flags: FLOW-001 unauthenticated flow into a more trusted zone, FLOW-002 sensitive data in plaintext (critical across a trust-0 boundary), FLOW-003 plaintext boundary crossing, FLOW-004 auth not stated, FLOW-005 encryption not stated for sensitive data, FLOW-006 store reached straight from a trust-0 zone, ELEM-001 logging off or not stated, ELEM-002 store in a low-trust zone, ELEM-003 component with no flows.
+Element threats follow STRIDE-per-element (external S R, process S T R I D E, store T I D) plus type-specific ones (web XSS and CSRF, API object-level authorization, mobile, LLM threats named after the OWASP LLM Top 10 2025: LLM-T01 prompt injection, LLM-I01 disclosure, LLM-E01 excessive agency, LLM-D01 unbounded consumption, LLM-I02 system prompt leakage, LLM-T03 improper output handling, LLM-T02 vector and embedding weaknesses when the LLM talks to a db or storage; storage, queue). Flows that cross a zone get T I D.
+Privacy mode adds LINDDUN threats (PRV-DD01, PRV-U01, PRV-D01, PRV-N01 on processes, PRV-L01, PRV-I01, PRV-NC01 on stores, PRV-L02 on third parties) only where flows carry personal data.
+Design flags: FLOW-001 unauthenticated flow into a more trusted zone, FLOW-002 sensitive data in plaintext (critical across a trust-0 boundary), FLOW-003 plaintext boundary crossing, FLOW-004 auth not stated, FLOW-005 encryption not stated for sensitive data, FLOW-006 store reached straight from a trust-0 zone, ELEM-001 logging off or not stated, ELEM-002 store in a low-trust zone, ELEM-003 component with no flows, ELEM-004 LLM with private data, untrusted input and an outbound channel (high).
 Likelihood and impact are 1-3; threat severity is high at 9, medium at 4-6, low at 1-3. Details and every id in `references/stride-catalog.md`.
 
 The diagram draws one subgraph per zone (with its trust level), shapes by type (stadium for users, cylinder for stores, double box for queues) and red arrows for flows with a medium or worse flag.
 
-JSON: `{name, summary: {components, flows, boundary_crossings, flags, threats, by_severity}, warnings, findings: [{id, severity, title, detail, fix, location, kind: flag|threat, stride, likelihood, impact}], mermaid, flows: [{key, from, to, from_zone, to_zone, crosses_boundary, inbound, encrypted, authenticated, data_level, sensitive, ...}]}`.
+JSON: `{name, summary: {components, flows, boundary_crossings, flags, threats, privacy_threats, by_severity}, warnings, findings: [{id, severity, title, detail, fix, location, kind: flag|threat|privacy, stride, likelihood, impact, linddun (privacy only)}], mermaid, flows: [{key, from, to, from_zone, to_zone, crosses_boundary, inbound, encrypted, authenticated, data_level, sensitive, personal, ...}]}`.
 
 ### model_diff.py
 
@@ -99,5 +113,5 @@ Keep the full threat table in the file, not in chat, when it is longer than abou
 
 ## References
 
-- `references/stride-catalog.md` the STRIDE letters, STRIDE-per-element, every threat and flag id with mitigations, how likelihood and impact are set, accepted data labels and protocols. Open it when explaining a threat or tuning scores
-- `references/session-guide.md` running the session on the four questions, timings, threat states, when to model again, a model file template and a notes table. Open it before facilitating
+- `references/stride-catalog.md` the STRIDE letters, STRIDE-per-element, every threat, flag and LINDDUN id with mitigations, how likelihood and impact are set, accepted data labels and protocols. Open it when explaining a threat or tuning scores
+- `references/session-guide.md` STRIDE vs LINDDUN vs PASTA, running the session on the four questions, timings, threat states, when to model again, a model file template and a notes table. Open it before facilitating

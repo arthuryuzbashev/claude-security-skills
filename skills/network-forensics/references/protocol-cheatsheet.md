@@ -2,6 +2,8 @@
 
 Quick facts for reading captures and connection logs. Examples use documentation addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) and `example.test` names.
 
+Contents: ports, DNS, HTTP request fields, TLS and JA4, encrypted DNS, Zeek and Suricata logs, capture formats, useful commands.
+
 ## Ports worth knowing
 
 | Port | Usually | Why it matters in an investigation |
@@ -65,7 +67,35 @@ Never paste cookies, `Authorization` headers or session tokens into a report. Ma
 - The ClientHello is cleartext up to TLS 1.3: the SNI (server name) shows which site the client asked for
 - Encrypted Client Hello (ECH) hides the real SNI behind an outer one; expect this to grow
 - Odd signs: SNI missing on traffic to a public IP, SNI that does not match the certificate, self-signed or very new certificates, random-looking SNI
-- Client fingerprints (JA3, JA4) can tie traffic to a tool family across IPs; compute them with Zeek or a dedicated tool when needed
+- Client fingerprints tie traffic to a TLS stack across IPs. JA3 is weaker now: Chrome has shuffled its TLS extension order since 2023, so one browser yields many JA3 values. JA4 sorts the lists first and stays stable
+
+JA4 layout (`pcap_summary.py` computes it, see `tls_ja4`), example `t13d1516h2_8daaf6152771_e5627efa2ab1`:
+
+| Part | Meaning |
+|---|---|
+| `t` | transport: `t` TCP, `q` QUIC, `d` DTLS |
+| `13` | highest TLS version offered (supported_versions, else the hello version): 13, 12, 11, 10, s3 |
+| `d` | `d` SNI present (domain), `i` no SNI (IP) |
+| `15`, `16` | cipher count and extension count, GREASE removed, capped at 99 |
+| `h2` | first and last character of the first ALPN value, `00` when none |
+| second part | first 12 hex chars of SHA-256 over the sorted cipher list |
+| third part | first 12 hex chars of SHA-256 over the sorted extensions (SNI and ALPN removed) plus the signature algorithms in order |
+
+Read it in parts: same `_b` and `_c` with a different `_a` usually means the same client talking to a different kind of server (no SNI, no ALPN). Pin the process with EDR before you name a tool from a JA4.
+
+## Encrypted DNS
+
+- DNS over HTTPS (DoH) rides on 443 and looks like web traffic. The SNI gives it away for public resolvers (`dns.google`, `cloudflare-dns.com`, `dns.quad9.net`, `doh.opendns.com`, `dns.nextdns.io` and others). NET-041 flags these
+- DNS over TLS (DoT) uses TCP/853; DNS over QUIC uses UDP/853
+- Browsers turn DoH on by themselves unless policy says no. Firefox checks the canary domain `use-application-dns.net`: an NXDOMAIN answer from the local resolver keeps it off
+- Malware uses DoH to resolve C2 without touching the company resolver, so a missing DNS log entry is not proof of no lookup
+
+## Logs from Zeek and Suricata
+
+- Zeek 8.0 is the current LTS line. `conn.log` `service` lists every protocol seen in a predictable order; `analyzer.log` replaced `dpd.log` for analyzer failures. `conn.log` writes a long connection only when it ends unless the long-connections package is loaded
+- Useful Zeek logs: `conn.log` (all flows), `dns.log`, `http.log`, `ssl.log` (SNI, versions; JA4 with the FoxIO package), `x509.log`, `files.log`, `notice.log`, `weird.log`
+- Suricata 8 `eve.json` holds one JSON object per line with `event_type` (`flow`, `alert`, `dns`, `tls`, `http`, `fileinfo`, `anomaly`). `flow` events carry `flow.start`, `flow.end`, `flow.age`, `bytes_toserver` and `bytes_toclient`. JA4 in tls events is off by default
+- Join Zeek and Suricata records on the community ID (`community_id`) when both are turned on
 
 ## Capture formats
 
@@ -85,6 +115,7 @@ capinfos capture.pcap                                     # span, packet count, 
 tshark -r capture.pcap -q -z conv,ip                      # conversations
 tshark -r capture.pcap -Y dns.flags.response==0 -T fields -e dns.qry.name | sort | uniq -c | sort -rn
 tshark -r capture.pcap -Y tls.handshake.type==1 -T fields -e ip.dst -e tls.handshake.extensions_server_name
+tshark -r capture.pcap -Y tls.handshake.type==1 -T fields -e ip.src -e tls.handshake.ja4   # newer Wireshark builds
 zeek -r capture.pcap                                      # writes conn.log, dns.log, http.log, ssl.log
 editcap -A "2026-03-04 08:00:00" -B "2026-03-04 09:00:00" big.pcap window.pcap   # cut a time window
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Linux baseline audit: sshd, kernel sysctls, file permissions, accounts, firewall.
+"""Read-only Linux baseline audit: sshd, kernel sysctls, file permissions, accounts, sudo, firewall, OS support.
 
 Every check reads files under --root (default /), so the same code can audit a live host,
 a mounted disk image or a fake tree in tests. Nothing is changed, nothing is executed.
@@ -9,10 +9,12 @@ Usage:
   linux_audit.py --root /mnt/image --json          # an offline disk image
   linux_audit.py --sysctl-file sysctl.txt          # use saved `sysctl -a` output
   linux_audit.py --shadow /tmp/shadow.copy --scan-path /etc --scan-path /opt
+  linux_audit.py --root /mnt/image --today 2026-11-19   # date used for the OS end-of-life check
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import glob
 import json
 import os
@@ -34,10 +36,16 @@ WEAK_SSH = {
                 "arcfour", "arcfour128", "arcfour256", "rijndael-cbc@lysator.liu.se"},
     "macs": {"hmac-md5", "hmac-md5-96", "hmac-md5-etm@openssh.com", "hmac-md5-96-etm@openssh.com",
              "hmac-sha1", "hmac-sha1-96", "hmac-sha1-etm@openssh.com", "hmac-sha1-96-etm@openssh.com",
-             "umac-64@openssh.com", "umac-64-etm@openssh.com", "hmac-ripemd160", "hmac-ripemd160@openssh.com"},
+             "umac-64@openssh.com", "umac-64-etm@openssh.com", "hmac-ripemd160", "hmac-ripemd160@openssh.com",
+             "hmac-ripemd160-etm@openssh.com"},
     "kexalgorithms": {"diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1",
                       "diffie-hellman-group-exchange-sha1"},
 }
+
+# SHA-1 RSA signatures and DSA keys. OpenSSH 8.8 disabled ssh-rsa signatures by default and OpenSSH 10.0 removed DSA.
+WEAK_KEY_ALGOS = {"ssh-dss", "ssh-rsa", "ssh-dss-cert-v01@openssh.com", "ssh-rsa-cert-v01@openssh.com"}
+KEY_ALGO_OPTIONS = ("hostkeyalgorithms", "pubkeyacceptedalgorithms", "pubkeyacceptedkeytypes",
+                    "casignaturealgorithms", "hostbasedacceptedalgorithms")
 
 # (id, key, wanted values, severity if not wanted, title, why, fix)
 SYSCTL_RULES = [
@@ -74,7 +82,64 @@ SYSCTL_RULES = [
     ("SYS-011", "fs.suid_dumpable", {"0"}, "low", "SUID programs may dump core",
      "Core dumps of privileged programs can contain secrets such as password hashes.",
      "fs.suid_dumpable = 0"),
+    ("SYS-012", "kernel.yama.ptrace_scope", {"1", "2", "3"}, "low", "Any process can trace other processes of the same user",
+     "With ptrace_scope 0 a compromised process can read the memory of the user's other programs (ssh-agent, browsers).",
+     "kernel.yama.ptrace_scope = 1"),
+    ("SYS-013", "fs.protected_symlinks", {"1"}, "medium", "Symlink protection is off",
+     "Symlinks in world-writable sticky directories such as /tmp can trick privileged programs into writing elsewhere.",
+     "fs.protected_symlinks = 1"),
+    ("SYS-014", "fs.protected_hardlinks", {"1"}, "medium", "Hardlink protection is off",
+     "Users can hardlink files they do not own, a common step in local privilege escalation.",
+     "fs.protected_hardlinks = 1"),
+    ("SYS-015", "kernel.unprivileged_bpf_disabled", {"1", "2"}, "low", "Unprivileged users can load eBPF programs",
+     "Unprivileged eBPF has been the entry point for several kernel privilege-escalation bugs.",
+     "kernel.unprivileged_bpf_disabled = 1 (2 lets root turn it back on at runtime)"),
+    ("SYS-016", "net.ipv4.conf.all.secure_redirects", {"0"}, "low", "Redirects from gateways accepted",
+     "secure_redirects still lets the default gateway (or anyone spoofing it) change routes.",
+     "net.ipv4.conf.all.secure_redirects = 0"),
+    ("SYS-017", "net.ipv4.conf.all.log_martians", {"1"}, "low", "Martian packets are not logged",
+     "Packets with impossible source addresses are dropped silently, which hides spoofing attempts.",
+     "net.ipv4.conf.all.log_martians = 1"),
+    ("SYS-018", "net.ipv4.icmp_echo_ignore_broadcasts", {"1"}, "low", "Host answers broadcast pings",
+     "Broadcast echo replies can be used for smurf amplification and network mapping.",
+     "net.ipv4.icmp_echo_ignore_broadcasts = 1"),
+    ("SYS-019", "net.ipv6.conf.all.forwarding", {"0"}, "medium", "IPv6 forwarding is on",
+     "The host routes IPv6 packets between interfaces, often by accident next to IPv4 rules.",
+     "net.ipv6.conf.all.forwarding = 0, unless this box is a router or container host"),
+    ("SYS-020", "net.ipv6.conf.all.accept_source_route", {"0"}, "medium", "Source-routed IPv6 packets accepted",
+     "The sender chooses the route, which helps bypass network filtering.",
+     "net.ipv6.conf.all.accept_source_route = 0"),
+    ("SYS-021", "net.ipv6.conf.all.accept_ra", {"0"}, "low", "IPv6 router advertisements accepted",
+     "Any host on the LAN can announce itself as a router and redirect IPv6 traffic. Fine on SLAAC clients, not on servers.",
+     "net.ipv6.conf.all.accept_ra = 0 on servers with static addressing"),
 ]
+
+# Supported-until dates per release: (end of standard security support, end of paid extended support or None).
+# Verified 2026-11-19 against endoflife.date. Ubuntu extended = Ubuntu Pro ESM, Debian extended = Freexian ELS,
+# RHEL extended = ELS add-on. Re-check these dates when you update the skill.
+OS_SUPPORT = {
+    ("ubuntu", "14.04"): ("2019-04-02", "2024-04-02"), ("ubuntu", "16.04"): ("2021-04-02", "2026-04-02"),
+    ("ubuntu", "18.04"): ("2023-05-31", "2028-04-26"), ("ubuntu", "20.04"): ("2025-05-31", "2030-04-23"),
+    ("ubuntu", "22.04"): ("2027-06-01", "2032-04-21"), ("ubuntu", "24.04"): ("2029-05-31", "2034-04-25"),
+    ("ubuntu", "26.04"): ("2031-05-29", "2036-04-23"),
+    ("ubuntu", "20.10"): ("2021-07-22", None), ("ubuntu", "21.04"): ("2022-01-20", None),
+    ("ubuntu", "21.10"): ("2022-07-14", None), ("ubuntu", "22.10"): ("2023-07-20", None),
+    ("ubuntu", "23.04"): ("2024-01-20", None), ("ubuntu", "23.10"): ("2024-07-12", None),
+    ("ubuntu", "24.10"): ("2025-07-10", None), ("ubuntu", "25.04"): ("2026-01-17", None),
+    ("ubuntu", "25.10"): ("2026-07-01", None), ("ubuntu", "26.10"): ("2027-07-01", None),
+    ("debian", "8"): ("2020-06-30", "2025-06-30"), ("debian", "9"): ("2022-07-01", "2027-06-30"),
+    ("debian", "10"): ("2024-06-30", "2029-06-30"), ("debian", "11"): ("2026-08-31", "2031-06-30"),
+    ("debian", "12"): ("2028-06-30", "2033-06-30"), ("debian", "13"): ("2030-06-30", "2035-06-30"),
+    ("centos", "6"): ("2020-11-30", None), ("centos", "7"): ("2024-06-30", None), ("centos", "8"): ("2021-12-31", None),
+    ("rhel", "6"): ("2020-11-30", "2024-06-30"), ("rhel", "7"): ("2024-06-30", "2029-05-31"),
+    ("rhel", "8"): ("2029-05-31", "2033-05-31"), ("rhel", "9"): ("2032-05-31", "2036-05-31"),
+    ("rhel", "10"): ("2035-05-31", "2039-05-31"),
+}
+SECRET_FILES = ["/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"]
+SECRET_GLOBS = ["/etc/ssh/ssh_host_*_key"]
+CONFIG_FILES = ["/etc/passwd", "/etc/group", "/etc/ssh/sshd_config", "/etc/sudoers", "/etc/crontab"]
+CONFIG_GLOBS = ["/etc/ssh/sshd_config.d/*", "/etc/sudoers.d/*", "/etc/cron.d/*"]
+SUDO_ALIASES = ("user_alias", "runas_alias", "host_alias", "cmnd_alias", "cmd_alias")
 
 KNOWN_SUID = {
     "passwd", "sudo", "su", "mount", "umount", "chsh", "chfn", "newgrp", "gpasswd", "pkexec", "ping", "ping6",
@@ -189,6 +254,37 @@ def check_sshd(root: str) -> Tuple[List[Dict], bool]:
         out.append(finding("SSH-005", "low", f"MaxAuthTries is {tries}",
                            "More attempts per connection make online guessing cheaper.",
                            "MaxAuthTries 4 (or lower)", where("maxauthtries")))
+    kbd_key = "kbdinteractiveauthentication" if "kbdinteractiveauthentication" in cfg else "challengeresponseauthentication"
+    kbd = cfg.get(kbd_key, "yes").lower()
+    if (kbd == "yes" and cfg.get("usepam", "no").lower() == "yes"
+            and eff["passwordauthentication"].lower() == "no"):
+        out.append(finding("SSH-009", "medium", "Passwords still accepted through keyboard-interactive PAM",
+                           "PasswordAuthentication is no, but KbdInteractiveAuthentication is "
+                           + ("yes" if kbd_key in cfg else "not set (default yes)")
+                           + " and UsePAM yes, so PAM can still prompt for the account password.",
+                           "KbdInteractiveAuthentication no (unless PAM runs a second factor such as a TOTP module)",
+                           where(kbd_key) if kbd_key in cfg else where("usepam")))
+    if cfg.get("hostbasedauthentication", "no").lower() == "yes" or cfg.get("ignorerhosts", "yes").lower() == "no":
+        key = "hostbasedauthentication" if cfg.get("hostbasedauthentication", "no").lower() == "yes" else "ignorerhosts"
+        out.append(finding("SSH-010", "medium", "Host-based or rhosts trust enabled",
+                           f"{key} is set so that logins can be trusted because of the client host or .rhosts/.shosts files.",
+                           "HostbasedAuthentication no and IgnoreRhosts yes (both are the defaults; delete the overrides)",
+                           where(key)))
+    if cfg.get("permituserenvironment", "no").lower() != "no":
+        out.append(finding("SSH-011", "medium", "Users can set environment variables for sshd",
+                           f"PermitUserEnvironment {cfg['permituserenvironment']} lets ~/.ssh/environment or authorized_keys "
+                           "set variables such as LD_PRELOAD, which can bypass ForceCommand and other restrictions.",
+                           "PermitUserEnvironment no", where("permituserenvironment")))
+    for key in KEY_ALGO_OPTIONS:
+        if key not in cfg or cfg[key].startswith("-"):
+            continue
+        weak = [a for a in (x.strip().lower() for x in cfg[key].lstrip("+^").split(",")) if a in WEAK_KEY_ALGOS]
+        if weak:
+            out.append(finding("SSH-012", "medium", "SHA-1 RSA or DSA key algorithms enabled",
+                               f"{key}: {', '.join(weak)}. ssh-rsa signs with SHA-1 and DSA keys are obsolete "
+                               "(removed in OpenSSH 10.0).",
+                               "Remove them; rsa-sha2-256 and rsa-sha2-512 keep RSA keys working. Replace DSA keys with ed25519.",
+                               where(key)))
     for key, rid, label in (("ciphers", "SSH-006", "ciphers"), ("macs", "SSH-007", "MACs"),
                             ("kexalgorithms", "SSH-008", "key exchange")):
         if key not in cfg:
@@ -351,6 +447,183 @@ def check_accounts(root: str, shadow_path: Optional[str]) -> Tuple[List[Dict], b
     return out, ran
 
 
+# ---------------------------------------------------------------- critical file permissions
+
+def _expand(root: str, paths: List[str], globs: List[str]) -> List[str]:
+    out = [p for p in paths if os.path.isfile(rooted(root, p))]
+    for pattern in globs:
+        out += [logical(root, real) for real in sorted(glob.glob(rooted(root, pattern))) if os.path.isfile(real)]
+    return out
+
+
+def check_permissions(root: str, any_owner: bool = False) -> Tuple[List[Dict], bool]:
+    """Mode bits on secret and security-critical files. Only root-owned files are judged (a copied
+    tree in a home folder keeps the copier's umask), unless any_owner is set."""
+    out, ran = [], False
+    for path, secret in [(p, True) for p in _expand(root, SECRET_FILES, SECRET_GLOBS)] + \
+                        [(p, False) for p in _expand(root, CONFIG_FILES, CONFIG_GLOBS)]:
+        try:
+            st = os.lstat(rooted(root, path))
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode) or (st.st_uid != 0 and not any_owner):
+            continue
+        ran = True
+        mode = stat.S_IMODE(st.st_mode)
+        if secret and mode & (stat.S_IROTH | stat.S_IWOTH | stat.S_IWGRP):
+            out.append(finding("FS-003", "high", "Secret file readable or writable by other users",
+                               f"{path} has mode {mode:04o}. Password hashes and SSH host keys must not be readable by "
+                               "other users or writable by the group.",
+                               f"chmod {'0600' if '/ssh/' in path else '0640'} {path} (owner root"
+                               + ("" if "/ssh/" in path else ", group shadow or root") + ")", path))
+        elif not secret and mode & (stat.S_IWGRP | stat.S_IWOTH):
+            out.append(finding("FS-004", "high", "Security-critical config writable by group or others",
+                               f"{path} has mode {mode:04o}. Whoever can write it can add accounts, sudo rights, "
+                               "cron jobs or sshd options.",
+                               f"chmod go-w {path} (sudoers files 0440, sshd_config 0600 or 0644)", path))
+    return out, ran
+
+
+# ---------------------------------------------------------------- sudo
+
+def _sudo_files(root: str) -> List[str]:
+    files = []
+    if os.path.isfile(rooted(root, "/etc/sudoers")):
+        files.append("/etc/sudoers")
+    base = rooted(root, "/etc/sudoers.d")
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            if "." in name or name.endswith("~") or not os.path.isfile(os.path.join(base, name)):
+                continue  # sudo skips these names in an includedir
+            files.append("/etc/sudoers.d/" + name)
+    return files
+
+
+def _sudo_lines(text: str) -> List[str]:
+    lines, buf = [], ""
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.lstrip().startswith(("#include", "@include")):
+            continue
+        line = line.split("#", 1)[0].rstrip() if not line.lstrip().startswith("#") else ""
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        line = (buf + line).strip()
+        buf = ""
+        if line:
+            lines.append(line)
+    return lines
+
+
+def check_sudo(root: str) -> Tuple[List[Dict], bool]:
+    files = _sudo_files(root)
+    out = []
+    for path in files:
+        for line in _sudo_lines(read_text(rooted(root, path)) or ""):
+            low = line.lower()
+            first = low.split(None, 1)[0]
+            if first.startswith("defaults"):
+                parts = line.split(None, 1)
+                opts = [o.strip() for o in parts[1].split(",")] if len(parts) > 1 else []
+                for opt in opts:
+                    o = opt.replace(" ", "").lower()
+                    if o == "!authenticate":
+                        out.append(finding("SUDO-002", "high", "sudo asks nobody for a password (!authenticate)",
+                                           f"{line} turns off authentication for the users it covers.",
+                                           "Remove !authenticate; grant NOPASSWD only to specific commands that need it.", path))
+                    elif o in ("!use_pty", "!env_reset"):
+                        out.append(finding("SUDO-003", "low", f"Risky sudo default: {o}",
+                                           ("Commands run without a pseudo-terminal, so a background process can keep "
+                                            "access to the terminal after sudo ends." if o == "!use_pty" else
+                                            "The caller's environment (LD_*, PYTHONPATH...) is passed to commands run as root."),
+                                           f"Remove {o} (use_pty and env_reset are the safe defaults).", path))
+                    elif o.startswith("timestamp_timeout="):
+                        try:
+                            mins = float(o.split("=", 1)[1])
+                        except ValueError:
+                            continue
+                        if mins < 0 or mins > 15:
+                            out.append(finding("SUDO-003", "low", f"sudo credentials cached too long ({o})",
+                                               "A negative value never expires; long values let anyone at an open terminal "
+                                               "run root commands without the password.",
+                                               "Defaults timestamp_timeout=15 or lower", path))
+                continue
+            if first in SUDO_ALIASES:
+                continue
+            m = low.find("nopasswd:")
+            if m >= 0 and low[m + len("nopasswd:"):].strip().split(",")[0].strip().startswith("all"):
+                out.append(finding("SUDO-001", "medium", f"Passwordless sudo to every command for {line.split()[0]}",
+                                   f"{line}: anyone who gets this account (stolen key, compromised app) is root "
+                                   "with no further check.",
+                                   "Require the password (drop NOPASSWD) or limit NOPASSWD to the exact commands needed. "
+                                   "Cloud images add this for the default user in /etc/sudoers.d/90-cloud-init-users.", path))
+    return out, bool(files)
+
+
+# ---------------------------------------------------------------- OS support and automatic updates
+
+def read_os_release(root: str) -> Optional[Dict[str, str]]:
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        text = read_text(rooted(root, path))
+        if text is None:
+            continue
+        info = {}
+        for line in text.splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                info[k.strip().upper()] = v.strip().strip('"').strip("'")
+        return info
+    return None
+
+
+def check_updates(root: str, today: dt.date) -> Tuple[List[Dict], bool]:
+    info = read_os_release(root)
+    if info is None:
+        return [], False
+    out = []
+    os_id = info.get("ID", "").lower()
+    version = info.get("VERSION_ID", "")
+    like = (os_id + " " + info.get("ID_LIKE", "")).lower().split()
+    name = info.get("PRETTY_NAME") or f"{os_id} {version}"
+    key = (os_id, version if os_id == "ubuntu" else version.split(".")[0])
+    if key in OS_SUPPORT:
+        eol, extended = OS_SUPPORT[key]
+        if today > dt.date.fromisoformat(eol):
+            if extended and today <= dt.date.fromisoformat(extended):
+                out.append(finding("UPD-001", "medium", f"{name}: standard security support ended {eol}",
+                                   f"Free security updates stopped on {eol}. Fixes now come only through paid extended "
+                                   f"support (until {extended}).",
+                                   "Upgrade to a supported release, or confirm the extended support subscription is "
+                                   "active (Ubuntu: `pro status`).", "/etc/os-release"))
+            else:
+                out.append(finding("UPD-001", "high", f"{name} is end of life",
+                                   f"Support ended {extended or eol}. No security updates are published for it.",
+                                   "Upgrade or rebuild on a supported release.", "/etc/os-release"))
+    if "debian" in like or "ubuntu" in like:
+        enabled = None
+        for path in sorted(glob.glob(rooted(root, "/etc/apt/apt.conf.d/*"))):
+            for line in (read_text(path) or "").splitlines():
+                if "APT::Periodic::Unattended-Upgrade" in line and not line.strip().startswith("//"):
+                    enabled = '"0"' not in line.replace(" ", "")
+        if not enabled:
+            out.append(finding("UPD-002", "low", "Automatic security updates are not enabled",
+                               "APT::Periodic::Unattended-Upgrade is " + ("set to 0" if enabled is False else "not set")
+                               + ", so security fixes wait for someone to log in and patch.",
+                               "apt install unattended-upgrades && dpkg-reconfigure -plow unattended-upgrades "
+                               "(or patch through your config management on a fixed schedule).", "/etc/apt/apt.conf.d"))
+    elif any(x in like for x in ("rhel", "fedora", "centos")):
+        timers = [t for t in ("dnf-automatic.timer", "dnf-automatic-install.timer", "dnf5-automatic.timer")
+                  if os.path.exists(rooted(root, "/etc/systemd/system/timers.target.wants/" + t))]
+        if not timers:
+            out.append(finding("UPD-002", "low", "Automatic security updates are not enabled",
+                               "No dnf-automatic timer is enabled, so security fixes wait for a manual run.",
+                               "dnf install dnf-automatic, set upgrade_type = security in /etc/dnf/automatic.conf, "
+                               "systemctl enable --now dnf-automatic.timer (or patch through config management).",
+                               "/etc/systemd/system/timers.target.wants"))
+    return out, True
+
+
 # ---------------------------------------------------------------- firewall
 
 def check_firewall(root: str) -> Tuple[List[Dict], bool, str]:
@@ -381,7 +654,7 @@ def check_firewall(root: str) -> Tuple[List[Dict], bool, str]:
 
 def audit(root: str = "/", sysctl_values: Optional[Dict[str, str]] = None, shadow: Optional[str] = None,
           scan_paths: Optional[List[str]] = None, extra_suid: Optional[List[str]] = None,
-          skip_files: bool = False) -> Dict[str, object]:
+          skip_files: bool = False, today: Optional[dt.date] = None) -> Dict[str, object]:
     findings, ran, skipped = [], [], []
     f, ok = check_sshd(root)
     findings += f
@@ -399,6 +672,15 @@ def audit(root: str = "/", sysctl_values: Optional[Dict[str, str]] = None, shado
     f, ok = check_accounts(root, shadow)
     findings += f
     (ran if ok else skipped).append("accounts")
+    f, ok = check_permissions(root)
+    findings += f
+    (ran if ok else skipped).append("permissions")
+    f, ok = check_sudo(root)
+    findings += f
+    (ran if ok else skipped).append("sudo")
+    f, ok = check_updates(root, today or dt.date.today())
+    findings += f
+    (ran if ok else skipped).append("updates")
     f, _, fw_state = check_firewall(root)
     findings += f
     ran.append("firewall")
@@ -429,6 +711,7 @@ def main(argv=None) -> int:
     ap.add_argument("--scan-path", action="append", help="dir to scan for world-writable/SUID files (repeatable)")
     ap.add_argument("--allow-suid", action="append", default=[], help="extra SUID binary name or path to accept")
     ap.add_argument("--no-file-scan", action="store_true", help="skip the world-writable and SUID scan")
+    ap.add_argument("--today", help="date for the OS end-of-life check, YYYY-MM-DD (default: today)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any finding is at or above this severity (default: high)")
@@ -448,7 +731,12 @@ def main(argv=None) -> int:
         print(f"error: cannot read {args.shadow}", file=sys.stderr)
         return 2
 
-    res = audit(args.root, sysctl_values, args.shadow, args.scan_path, args.allow_suid, args.no_file_scan)
+    try:
+        today = dt.date.fromisoformat(args.today) if args.today else None
+    except ValueError:
+        print(f"error: --today must be YYYY-MM-DD, got {args.today}", file=sys.stderr)
+        return 2
+    res = audit(args.root, sysctl_values, args.shadow, args.scan_path, args.allow_suid, args.no_file_scan, today)
     print(json.dumps(res, indent=2) if args.json else render_text(res))
     if args.fail_on != "never":
         threshold = SEVERITY_ORDER.index(args.fail_on)

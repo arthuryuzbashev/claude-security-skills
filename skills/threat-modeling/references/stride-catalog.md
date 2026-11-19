@@ -1,5 +1,8 @@
 # STRIDE threat and mitigation catalog
 
+Contents: STRIDE letters, STRIDE per element, threat ids, design flags, default likelihood and impact, data labels,
+LINDDUN privacy threats, protocols.
+
 STRIDE was created at Microsoft by Loren Kohnfelder and Praerit Garg (1999). Each letter is the opposite of a security property:
 
 | Letter | Threat | Property it breaks | Plain question |
@@ -40,9 +43,12 @@ Repudiation applies to a store only when it holds audit logs. The script folds t
 | MOB-I01 | mobile | I | Sensitive data on the device | Keychain / Keystore, no secrets in logs or backups |
 | MOB-T01 | mobile | T | App modified or repackaged | All rules enforced server-side, attestation where it matters |
 | LLM-T01 | llm | T | Prompt injection (OWASP LLM01) | Treat all input and retrieved text as untrusted, separate instructions from data, confirm risky actions |
-| LLM-I01 | llm | I | Sensitive data disclosed by the model | No secrets in prompts, permission-filtered retrieval, output scanning |
-| LLM-E01 | llm | E | Excessive agency | Least-privilege tools acting as the end user, allow-listed actions, human approval |
-| LLM-D01 | llm | D | Cost and token exhaustion | Per-user quotas, length caps, agent loop limits, spend alerts |
+| LLM-I01 | llm | I | Sensitive data disclosed by the model (LLM02) | No secrets in prompts, permission-filtered retrieval, output scanning |
+| LLM-E01 | llm | E | Excessive agency (LLM06) | Least-privilege tools acting as the end user, allow-listed actions, human approval |
+| LLM-D01 | llm | D | Unbounded consumption (LLM10) | Per-user quotas, length caps, agent loop limits, spend alerts |
+| LLM-I02 | llm | I | System prompt leakage (LLM07) | Nothing secret in the system prompt, authorization enforced outside the model |
+| LLM-T03 | llm | T | Improper output handling (LLM05) | Encode model output for its sink, schema validation, never eval/shell/raw SQL |
+| LLM-T02 | llm with a db or storage flow | T | Vector and embedding weaknesses (LLM08) | Permission-aware retrieval, vetted and tagged sources, provenance, write access to the index limited |
 | STR-T10 | store | T | Stored data tampered with | Least-privilege accounts, audit tables, tested backups |
 | STR-I10 | store | I | Stored data disclosed | Encryption at rest, private network, per-service accounts, encrypted backups |
 | STR-D10 | store | D | Store unavailable or lost | Replicas, point-in-time recovery, immutable backups, capacity alerts |
@@ -57,6 +63,9 @@ Repudiation applies to a store only when it holds audit logs. The script folds t
 | STR-D30 | flow | D | Flow interrupted or flooded | Timeouts, retries with backoff, circuit breakers |
 
 The OWASP references (API Security Top 10 2023, Top 10 for LLM Applications 2025) are named so you can look them up; the script does not depend on them.
+LLM Top 10 2025 items the script does not generate on its own (raise them in the session when they apply): LLM03 Supply Chain
+(third-party models, adapters, model hubs), LLM04 Data and Model Poisoning (fine-tuning data), LLM09 Misinformation
+(answers people act on without checking).
 
 ## Design flags
 
@@ -73,6 +82,7 @@ Flags are specific problems in the model itself, not generic "this could happen"
 | ELEM-001 | medium / low | `logging: no` (medium when it receives cross-zone traffic) or logging not stated on a cross-zone receiver |
 | ELEM-002 | high | data store in a zone with trust 0 or 1 |
 | ELEM-003 | info | component with no flows |
+| ELEM-004 | high | an `llm` component that touches sensitive data or a store, receives input from a trust-0 zone or an external, and has a flow out to a trust-0 zone or an external. Prompt injection then has a way to read private data and send it out. Break one of the three legs |
 
 ## Default likelihood and impact
 
@@ -86,7 +96,27 @@ These are defaults to start the conversation. Change them when the team knows be
 
 ## Data classification labels the script understands
 
-`public`, `none` (level 0) · `internal` (1, also the default) · `confidential`, `pii`, `personal`, `financial` (2) · `secret`, `secrets`, `credentials`, `payment`, `pci`, `phi`, `health`, `restricted` (3). Unknown labels count as internal.
+`public`, `none` (level 0) · `internal` (1, also the default) · `confidential`, `pii`, `personal`, `financial`, `location` (2) · `secret`, `secrets`, `credentials`, `payment`, `pci`, `phi`, `health`, `biometric`, `genetic`, `restricted` (3). Unknown labels count as internal.
+Personal data labels (drive the LINDDUN threats): pii, personal, phi, health, biometric, genetic, location, financial, payment, pci. Special categories (PRV-N01, and likelihood 3 for PRV-D01): phi, health, biometric, genetic.
+
+## LINDDUN privacy threats (`--privacy` or `privacy: true`)
+
+LINDDUN is the privacy counterpart of STRIDE, from KU Leuven (linddun.org). Its seven categories: Linking, Identifying,
+Non-repudiation, Detecting, Data disclosure, Unawareness, Non-compliance. The script adds them only for elements that
+send or receive a flow labelled with personal data. They do not replace a DPIA; they give it a list to start from.
+
+| ID | LINDDUN | Applies to | Threat | Mitigations |
+|---|---|---|---|---|
+| PRV-DD01 | Data disclosure | process | More personal data collected or processed than the purpose needs | Field-by-field purpose list, drop or truncate the rest, derived values |
+| PRV-U01 | Unawareness | process | People are not told and cannot access, export, correct or delete | Notice at collection, consent where it is the basis, self-service rights that reach backups and processors |
+| PRV-D01 | Detecting | process reachable from trust 0 | Use of the service is visible from outside (account exists messages, timing, notification text, URLs) | Uniform responses, generic notifications, nothing sensitive in URLs |
+| PRV-N01 | Non-repudiation | process with special category data | Identity-linked records of sensitive actions can be held against the user | Decide where deniability matters, separate identity from content |
+| PRV-L01 | Linking | store | Records share stable ids that let them be joined into profiles | Per-purpose pseudonymous ids, separate data sets, restricted joins |
+| PRV-I01 | Identifying | store | Pseudonymous data tied back to a person | Remove direct identifiers, keep keys apart, aggregate before sharing |
+| PRV-NC01 | Non-compliance | store | No purpose, legal basis or retention period recorded | Processing register, retention schedule, automated deletion, DPIA |
+| PRV-L02 | Linking | external receiving personal data | Third party combines your data with its own (analytics, ads, SDKs, AI vendors) | Pseudonymous ids, contract limits on secondary use and training, transfer checks |
+
+Privacy findings have `kind: privacy`, an empty `stride` and a `linddun` letter (L, I, N, D, DD, U, NC).
 
 ## Protocols
 

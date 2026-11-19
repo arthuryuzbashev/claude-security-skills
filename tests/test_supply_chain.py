@@ -154,6 +154,108 @@ jobs:
         text = SAFE_WF.replace("jobs:", "env:\n  ACTIONS_ALLOW_UNSECURE_COMMANDS: true\njobs:")
         self.assertIn("GHA-041", ids(wf(text)))
 
+    def test_allow_unsafe_pr_checkout(self):
+        text = f"""on: pull_request_target
+permissions:
+  contents: read
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{SHA}
+        with:
+          allow-unsafe-pr-checkout: true
+"""
+        f = [x for x in wf(text) if x["id"] == "GHA-004"]
+        self.assertEqual([x["severity"] for x in f], ["critical"])
+        self.assertNotIn("GHA-004", ids(wf(text.replace("true", "false"))))
+
+    def test_pr_code_fetched_around_checkout_guard(self):
+        text = f"""on: issue_comment
+permissions:
+  contents: read
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr checkout ${{{{ github.event.issue.number }}}} && make
+"""
+        self.assertIn("GHA-005", ids(wf(text)))
+        self.assertNotIn("GHA-005", ids(wf(text.replace("on: issue_comment", "on: pull_request"))))
+        co = text.replace("      - run: gh pr checkout ${{ github.event.issue.number }} && make\n",
+                          f"      - uses: actions/checkout@{SHA}\n        with:\n          ref: refs/pull/${{{{ github.event.issue.number }}}}/head\n")
+        self.assertIn("GHA-005", ids(wf(co)))
+
+    def test_github_env_write(self):
+        text = f"""on: workflow_run
+permissions:
+  contents: read
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "NAME=$BRANCH" >> "$GITHUB_ENV"
+"""
+        self.assertIn("GHA-011", ids(wf(text)))
+        self.assertNotIn("GHA-011", ids(wf(text.replace("on: workflow_run", "on: push"))))
+
+    def test_secrets_inherit(self):
+        text = """on: push
+permissions:
+  contents: read
+jobs:
+  call:
+    uses: acme/shared/.github/workflows/deploy.yml@""" + SHA + """
+    secrets: inherit
+"""
+        self.assertIn("GHA-022", ids(wf(text)))
+        self.assertNotIn("GHA-022", ids(wf(text.replace("secrets: inherit", "secrets:\n      TOKEN: ${{ secrets.DEPLOY }}"))))
+
+    def test_artifact_poisoning(self):
+        text = f"""on: workflow_run
+permissions:
+  contents: read
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@{SHA}
+"""
+        self.assertIn("GHA-032", ids(wf(text)))
+        self.assertNotIn("GHA-032", ids(wf(text.replace("on: workflow_run", "on: push"))))
+
+    def test_compromised_actions(self):
+        text = SAFE_WF.replace(f"actions/checkout@{SHA} # v4", "tj-actions/changed-files@v45")
+        self.assertEqual([x["severity"] for x in wf(text) if x["id"] == "GHA-042"], ["high"])
+        bad = SAFE_WF.replace(f"actions/checkout@{SHA} # v4", "tj-actions/changed-files@0e58ed8" + "0" * 33)
+        self.assertEqual([x["severity"] for x in wf(bad) if x["id"] == "GHA-042"], ["critical"])
+        ok = SAFE_WF.replace(f"actions/checkout@{SHA} # v4", f"tj-actions/changed-files@{SHA}")
+        self.assertNotIn("GHA-042", ids(wf(ok)))
+        self.assertIn("GHA-042", ids(wf(SAFE_WF.replace(f"actions/checkout@{SHA} # v4", "reviewdog/action-shellcheck@v1"))))
+
+    def test_container_credentials(self):
+        text = SAFE_WF.replace("    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    container:\n      image: ghcr.io/acme/build:1\n"
+                               "      credentials:\n        username: bot\n        password: FAKEpassword123\n")
+        self.assertIn("GHA-043", ids(wf(text)))
+        self.assertNotIn("GHA-043", ids(wf(text.replace("FAKEpassword123", "${{ secrets.REGISTRY_PASSWORD }}"))))
+
+    def test_plain_http_download(self):
+        self.assertIn("GHA-044", ids(wf(SAFE_WF.replace("npm ci --ignore-scripts && npm test", "curl -o tool http://dl.example.test/tool"))))
+        self.assertNotIn("GHA-044", ids(wf(SAFE_WF.replace("npm ci --ignore-scripts && npm test", "curl -o tool https://dl.example.test/tool"))))
+
+    def test_shai_hulud_traces(self):
+        f = []
+        for doc in ci.load_yaml_docs(SAFE_WF):
+            f += ci.audit_workflow(doc, ".github/workflows/shai-hulud-workflow.yml")
+        self.assertIn("GHA-045", ids(f))
+        runner = SAFE_WF.replace("on: [push, pull_request]", "on: discussion").replace("ubuntu-latest", "[self-hosted, SHA1HULUD]")
+        self.assertIn("GHA-045", ids(wf(runner)))
+        self.assertNotIn("GHA-045", ids(wf(SAFE_WF)))
+
+    def test_discussion_counts_as_outside_input(self):
+        text = SAFE_WF.replace("on: [push, pull_request]", "on: discussion").replace("ubuntu-latest", "self-hosted")
+        self.assertIn("GHA-031", ids(wf(text)))
+
     def test_non_workflow_yaml_is_ignored(self):
         self.assertEqual(wf("name: not a workflow\nsteps: []\n"), [])
 
@@ -237,6 +339,40 @@ class TyposquatChecks(unittest.TestCase):
         self.assertEqual(ts.check_file("package.json", plain, set(), [])[0][0]["severity"], "medium")
         ok = '{"scripts": {"build": "vite build"}}'
         self.assertEqual(ts.check_file("package.json", ok, set(), [])[0], [])
+
+    def test_shai_hulud_hook(self):
+        worm = '{"scripts": {"preinstall": "node setup_bun.js"}}'
+        f, _ = ts.check_file("package.json", worm, set(), [])
+        self.assertIn("TYPO-011", ids(f))
+        self.assertNotIn("TYPO-011", ids(ts.check_file("package.json", '{"scripts": {"preinstall": "node setup.js"}}', set(), [])[0]))
+
+    def test_known_malicious_versions(self):
+        pkg = '{"dependencies": {"chalk": "5.6.1", "debug": "^4.4.2"}}'
+        f, _ = ts.check_file("package.json", pkg, set(), [])
+        bad = [x for x in f if x["id"] == "TYPO-012"]
+        self.assertEqual(len(bad), 1, "only the exact pin, not the range")
+        self.assertEqual(bad[0]["severity"], "critical")
+        self.assertEqual(ts.check_file("package.json", '{"dependencies": {"chalk": "5.6.2"}}', set(), [])[0], [])
+        f, _ = ts.check_file("requirements.txt", "ultralytics==8.3.41\nrequests==2.32.3\n", set(), [])
+        self.assertEqual([x["location"] for x in f if x["id"] == "TYPO-012"], ["requirements.txt:1"])
+        self.assertEqual(ts.check_file("requirements.txt", "ultralytics==8.3.47\n", set(), [])[0], [])
+
+    def test_lockfile(self):
+        lock = json.dumps({"lockfileVersion": 3, "packages": {
+            "": {"name": "app"},
+            "node_modules/@ctrl/tinycolor": {"version": "4.1.2"},
+            "node_modules/lodash": {"version": "4.17.21"}}}, indent=2)
+        f, n = ts.check_file("package-lock.json", lock, set(), [])
+        self.assertEqual(n, 2)
+        self.assertEqual([x["id"] for x in f], ["TYPO-012"])
+        clean = lock.replace("4.1.2", "4.1.0")
+        self.assertEqual(ts.check_file("package-lock.json", clean, set(), [])[0], [])
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "package-lock.json"), "w") as fh:
+                fh.write(lock)
+            code, out, _ = call_main(ts, [d, "--json"])
+            self.assertEqual(code, 1)
+            self.assertIn("TYPO-012", ids(json.loads(out)["findings"]))
 
     def test_dependency_confusion_npm(self):
         pkg = '{"dependencies": {"acme-ui-kit": "1.0.0", "@acme/auth": "1.0.0"}}'

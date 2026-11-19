@@ -32,7 +32,11 @@ REQUIRED = ["id", "title", "likelihood", "impact"]
 ALIASES = {"risk_id": "id", "risk": "title", "name": "title", "l": "likelihood", "i": "impact",
            "risk_owner": "owner", "control_effectiveness": "effectiveness", "controls_effectiveness": "effectiveness",
            "next_review_date": "next_review", "review_due": "next_review", "last_review_date": "last_review",
-           "last_reviewed": "last_review", "residual_l": "residual_likelihood", "residual_i": "residual_impact"}
+           "last_reviewed": "last_review", "residual_l": "residual_likelihood", "residual_i": "residual_impact",
+           "acceptance_expiry": "accepted_until", "acceptance_expires": "accepted_until",
+           "acceptance_until": "accepted_until", "accept_until": "accepted_until",
+           "target_date": "treatment_due", "due_date": "treatment_due", "action_due": "treatment_due",
+           "treatment_date": "treatment_due"}
 
 
 def finding(fid, severity, title, detail, fix, location=None) -> Dict[str, Any]:
@@ -121,6 +125,8 @@ def load_register(text: str, review_days: int = 180) -> Tuple[List[Dict[str, Any
                 residual_basis = "effectiveness"
             last = _date(row.get("last_review", ""), "last_review")
             nxt = _date(row.get("next_review", ""), "next_review")
+            accepted_until = _date(row.get("accepted_until", ""), "accepted_until")
+            treatment_due = _date(row.get("treatment_due", ""), "treatment_due")
         except ValueError as err:
             errors.append(f"{label}: {err}")
             continue
@@ -135,6 +141,8 @@ def load_register(text: str, review_days: int = 180) -> Tuple[List[Dict[str, Any
             "effectiveness": eff, "residual": residual, "residual_rating": rating(residual),
             "residual_basis": residual_basis, "residual_position": residual_pos,
             "last_review": last.isoformat() if last else None, "review_due": due.isoformat() if due else None,
+            "accepted_until": accepted_until.isoformat() if accepted_until else None,
+            "treatment_due": treatment_due.isoformat() if treatment_due else None,
         })
     return risks, errors
 
@@ -142,6 +150,15 @@ def load_register(text: str, review_days: int = 180) -> Tuple[List[Dict[str, Any
 def check(risks: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
     """Governance checks on open risks: owners, review dates, acceptance of high risk, treatment gaps."""
     out = []
+    seen: Dict[str, int] = {}
+    for r in risks:
+        seen[r["id"]] = seen.get(r["id"], 0) + 1
+    for rid, n in seen.items():
+        if n > 1:
+            out.append(finding("RR-009", "medium", "Duplicate risk id",
+                               f"{rid} appears {n} times. Treatment actions, audit evidence and reports that cite "
+                               "the id become ambiguous.",
+                               "Give every risk a unique id; merge the rows if they are the same risk.", rid))
     for r in risks:
         if r["status"] in CLOSED:
             continue
@@ -172,6 +189,20 @@ def check(risks: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
             out.append(finding("RR-005", "medium", "No treatment decision",
                                f"{r['id']} is {r['residual_rating']} after controls but has no treatment (mitigate, transfer, avoid, accept).",
                                "Decide the treatment and add the actions with dates.", loc))
+        accepted = r["treatment"] in ("accept", "accepted", "tolerate")
+        if accepted and r.get("accepted_until") and date.fromisoformat(r["accepted_until"]) < today:
+            out.append(finding("RR-008", "high" if r["residual_rating"] == "critical" else "medium",
+                               "Risk acceptance expired",
+                               f"{r['id']} was accepted until {r['accepted_until']}; the acceptance has lapsed, so "
+                               "the risk is open without a valid decision.",
+                               "Have the risk owner re-approve the acceptance with a new expiry, or plan treatment.", loc))
+        if (not accepted and r.get("treatment_due") and date.fromisoformat(r["treatment_due"]) < today):
+            days = (today - date.fromisoformat(r["treatment_due"])).days
+            out.append(finding("RR-010", "medium" if serious else "low", "Treatment action overdue",
+                               f"{r['id']} treatment was due on {r['treatment_due']} ({days} days ago) and the risk "
+                               "is still open.",
+                               "Confirm the action is done (then lower the scores or close the risk) or agree a new date "
+                               "with the owner.", loc))
         if r["residual"] > r["inherent"]:
             out.append(finding("RR-006", "low", "Residual risk above inherent",
                                f"{r['id']}: residual {r['residual']:g} > inherent {r['inherent']}. Controls cannot make a risk worse.",

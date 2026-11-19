@@ -30,7 +30,7 @@ python3 scripts/ios_plist_audit.py ipa/Payload/App.app/Info.plist --json > ios.j
 codesign -d --entitlements :- ipa/Payload/App.app > ent.plist
 python3 scripts/ios_plist_audit.py ipa/Payload/App.app/Info.plist --entitlements ent.plist
 ```
-`codesign` runs on macOS only. Answers: debug builds, backup, transport security, IPC surface, deep links, permissions, entitlements.
+`codesign` runs on macOS only. The iOS script also reads `PrivacyInfo.xcprivacy` from the `.app` folder (or `--privacy-manifest` for a source tree); frameworks under `App.app/Frameworks/` carry their own manifests, so run it once per SDK bundle you care about. Answers: debug builds, backup, transport security, IPC surface, deep links, permissions, entitlements, Play target API level, privacy manifest gaps.
 
 ## 3. Static: code and bundle
 

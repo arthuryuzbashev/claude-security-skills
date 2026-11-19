@@ -54,15 +54,32 @@ CATEGORIES: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
              "identity endpoints deserve MFA and rate limits"),
     "storage": ("info", ("s3", "bucket", "files", "uploads", "storage", "cdn", "assets", "media"),
                 "storage hosts can expose listable buckets"),
+    "api-docs": ("low", ("swagger", "openapi", "graphql", "graphiql", "redoc", "apidocs", "apidoc", "playground",
+                         "postman"),
+                 "API docs and GraphQL consoles list every endpoint and are often left open on non-prod APIs"),
 }
 
 # CNAME targets on services where an unclaimed name can often be registered by someone else.
+# Based on the public can-i-take-over-xyz status list (checked 2026-11). Services listed there as
+# not vulnerable (WP Engine, Zendesk, CloudFront, Fastly, Firebase, ELB) are left out, so a dangling
+# CNAME to them is reported as SRF-022 instead. GitHub Pages, Heroku, Netlify and Vercel are edge
+# cases (takeover depends on account and verification settings) and stay in.
 TAKEOVER_SUFFIXES = (
+    # AWS
     "s3.amazonaws.com", "s3-website", "elasticbeanstalk.com",
-    "herokuapp.com", "herokudns.com", "azurewebsites.net", "cloudapp.net", "cloudapp.azure.com",
-    "trafficmanager.net", "blob.core.windows.net", "azureedge.net", "github.io", "netlify.app",
-    "netlify.com", "vercel.app", "pages.dev", "ghost.io", "readthedocs.io", "surge.sh",
-    "bitbucket.io", "wpengine.com", "pantheonsite.io", "zendesk.com", "helpscoutdocs.com",
+    # Azure
+    "azurewebsites.net", "cloudapp.net", "cloudapp.azure.com", "trafficmanager.net", "blob.core.windows.net",
+    "azureedge.net", "azure-api.net", "azurehdinsight.net", "azurecontainer.io", "database.windows.net",
+    "azuredatalakestore.net", "search.windows.net", "azurecr.io", "redis.cache.windows.net",
+    "servicebus.windows.net", "visualstudio.com",
+    # hosting and site builders
+    "herokuapp.com", "herokudns.com", "github.io", "netlify.app", "netlify.com", "vercel.app", "pages.dev",
+    "ghost.io", "readthedocs.io", "surge.sh", "bitbucket.io", "pantheonsite.io", "wordpress.com",
+    "s.strikinglydns.com", "launchrock.com", "worksites.net", "airee.ru", "animaapp.io", "hatenablog.com",
+    "ngrok.io", "furyns.com",
+    # help desks, docs and SaaS pages
+    "helpscoutdocs.com", "helpjuice.com", "helprace.com", "readme.io", "trydiscourse.com", "agilecrm.com",
+    "youtrack.cloud", "surveysparrow.com", "read.uberflip.com", "stats.uptimerobot.com",
 )
 
 HOST_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$")

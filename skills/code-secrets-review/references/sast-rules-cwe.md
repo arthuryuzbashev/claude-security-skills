@@ -13,6 +13,8 @@ Each finding is a candidate. Confirm it by tracing whether data an attacker cont
 | CWE-98 | PHP Remote File Inclusion (improper control of filename for include/require) |
 | CWE-295 | Improper Certificate Validation |
 | CWE-328 | Use of Weak Hash |
+| CWE-338 | Use of Cryptographically Weak PRNG |
+| CWE-347 | Improper Verification of Cryptographic Signature |
 | CWE-377 | Insecure Temporary File |
 | CWE-489 | Active Debug Code |
 | CWE-502 | Deserialization of Untrusted Data |
@@ -32,6 +34,8 @@ Each finding is a candidate. Confirm it by tracing whether data an attacker cont
 | PY-007 CWE-489 | `debug=True`, `DEBUG = True` | `DEBUG = os.environ.get("DEBUG") == "1"` |
 | PY-008 CWE-328 | `hashlib.md5/sha1` | `hashlib.sha256`; passwords: argon2, bcrypt, scrypt; checksums: `usedforsecurity=False` |
 | PY-009 CWE-377 | `tempfile.mktemp` | `tempfile.mkstemp`, `NamedTemporaryFile` |
+| PY-010 CWE-347 | `options={"verify_signature": False}`, `algorithms=[... "none"]` in PyJWT | `jwt.decode(t, key, algorithms=["RS256"], audience=..., issuer=...)` |
+| PY-011 CWE-338 | `random.choice`/`randint`/... assigned to a token, OTP, salt, session or reset name | `secrets.token_urlsafe(32)`, `secrets.choice` |
 
 ## JavaScript and TypeScript
 
@@ -44,6 +48,8 @@ Each finding is a candidate. Confirm it by tracing whether data an attacker cont
 | JS-005 CWE-89 | SQL in a template literal or concatenation | `db.query("... = $1", [id])` |
 | JS-006 CWE-328 | `createHash("md5"/"sha1")` | `createHash("sha256")`; passwords: bcrypt, argon2 |
 | JS-007 CWE-295 | `rejectUnauthorized: false`, `NODE_TLS_REJECT_UNAUTHORIZED=0` | `ca: fs.readFileSync("ca.pem")` |
+| JS-008 CWE-347 | `algorithms: [... 'none']`, `ignoreExpiration: true` in jsonwebtoken or jose options | `jwt.verify(t, key, { algorithms: ["RS256"], audience, issuer })` |
+| JS-009 CWE-338 | `Math.random()` assigned to a token, secret, OTP, salt or session name | `crypto.randomBytes(32)`, `crypto.randomUUID()`, `crypto.getRandomValues` |
 
 ## PHP
 

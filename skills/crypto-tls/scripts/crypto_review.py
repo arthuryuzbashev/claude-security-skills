@@ -2,8 +2,9 @@
 """Scan source code for weak cryptography, or identify the format of a hash string.
 
 Scan mode greps files for weak hashes on passwords, ECB, static IVs, hard-coded keys,
-non-crypto randomness for secrets, DES/3DES/RC4, small RSA keys, disabled certificate
-checks and JWT "none". Hash-id mode names a hash format (md5, bcrypt, argon2id ...);
+non-crypto randomness for secrets, DES/3DES/RC4, small RSA keys, RSA PKCS#1 v1.5 or raw
+encryption, low PBKDF2 iterations, low bcrypt cost, disabled certificate checks, pinned
+old TLS versions and JWT "none". Hash-id mode names a hash format (md5, bcrypt, argon2id ...);
 it never tries to crack anything.
 
 Usage:
@@ -84,6 +85,43 @@ TLS_OFF = re.compile(
     r"|strict_?ssl\s*[:=]\s*false|ssl_?verify\s*[:=]\s*false|sslVerify\s*=\s*false|setHostnameVerifier\([^)]*->\s*true", I)
 JWT_NONE = re.compile(r"algorithms?['\"]?\s*[:=]\s*(\[[^\]]*)?['\"]none['\"]|['\"]alg['\"]\s*:\s*['\"]none['\"]|Algorithm\.none\(\)", I)
 JWT_NOVERIFY = re.compile(r"verify_signature['\"]?\s*:\s*False|jwt\.decode\([^)]*verify\s*=\s*False|ignoreExpiration\s*:\s*true", I)
+# Java names RSA transforms "RSA/ECB/...": the ECB there is a no-op label, not a block mode.
+RSA_ECB_LABEL = re.compile(r"RSA/ECB/", I)
+RSA_NO_PADDING = re.compile(r"RSA/(ECB|NONE)/NoPadding|RSA_NO_PADDING|\bNoPadding\(\)", I)
+RSA_PKCS1_ENC = re.compile(
+    r"RSA/(ECB|NONE)/PKCS1Padding|RSA_PKCS1_PADDING|rsa\.(Encrypt|Decrypt)PKCS1v15(SessionKey)?\("
+    r"|RSAEncryptionPadding\.Pkcs1\b|Cipher\s+import\s+PKCS1_v1_5|Cipher\.PKCS1_v1_5"
+    r"|\.(encrypt|decrypt)\([^)]*padding\.PKCS1v15\(\)|OPENSSL_PKCS1_PADDING", I)
+# PBKDF2 iteration counts (OWASP Password Storage Cheat Sheet, checked 2026-11-19).
+PBKDF2_MIN = {"sha1": 1_400_000, "sha256": 600_000, "sha512": 220_000}
+PBKDF2_CALLS = [
+    re.compile(r"iterations\s*[:=]\s*(?P<n>\d[\d_]*)", I),                           # PBKDF2HMAC(iterations=...), {iterations: n}
+    re.compile(r"pbkdf2_hmac\(\s*[^,]+,[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),            # Python hashlib
+    re.compile(r"pbkdf2(Sync)?\(\s*[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),                # Node crypto
+    re.compile(r"pbkdf2\.Key\(\s*[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),                 # Go x/crypto
+    re.compile(r"PBEKeySpec\(\s*[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),                   # Java
+    re.compile(r"Rfc2898DeriveBytes(\.Pbkdf2)?\(\s*[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),  # .NET
+    re.compile(r"openssl_pbkdf2\(\s*[^,]+,[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),         # PHP
+    re.compile(r"hash_pbkdf2\(\s*[^,]+,[^,]+,[^,]+,\s*(?P<n>\d[\d_]*)", I),            # PHP
+]
+PBKDF2_CTX = re.compile(r"pbkdf2|PBEKeySpec|Rfc2898DeriveBytes", I)
+BCRYPT_COST = [
+    re.compile(r"gensalt\(\s*(rounds\s*=\s*)?(?P<n>\d{1,2})\s*[,)]", I),               # Python bcrypt, Java jBCrypt
+    re.compile(r"genSalt(Sync)?\(\s*(?P<n>\d{1,2})\s*[,)]", I),                       # Node bcrypt(js)
+    re.compile(r"bcrypt\w*\.hash(Sync)?\(\s*[^,]+,\s*(?P<n>\d{1,2})\s*[,)]", I),       # Node bcrypt.hash(pw, 8)
+    re.compile(r"GenerateFromPassword\(\s*[^,]+,\s*(?P<n>\d{1,2})\s*\)"),              # Go
+    re.compile(r"BCryptPasswordEncoder\(\s*(?P<n>\d{1,2})\s*[,)]"),                     # Spring
+    re.compile(r"PASSWORD_BCRYPT[^)]*['\"]cost['\"]\s*=>\s*(?P<n>\d{1,2})"),             # PHP
+    re.compile(r"BCRYPT_ROUNDS\s*[:=]\s*['\"]?(?P<n>\d{1,2})\b"),                         # Laravel .env / config
+]
+BCRYPT_MIN_COST = 10
+GO_BCRYPT_MIN = re.compile(r"GenerateFromPassword\([^)]*bcrypt\.MinCost")
+OLD_TLS_PIN = re.compile(
+    r"PROTOCOL_(SSLv2|SSLv3|TLSv1|TLSv1_1)\b|TLSVersion\.(SSLv3|TLSv1|TLSv1_1)\b|\b(SSLv3|TLSv1|TLSv1_1)_(client_|server_)?method\b"
+    r"|minVersion['\"]?\s*:\s*['\"]TLSv1(\.1)?['\"]|secureProtocol['\"]?\s*:\s*['\"](SSLv3|TLSv1|TLSv1_1)_method"
+    r"|MinVersion\s*:\s*tls\.Version(SSL30|TLS10|TLS11)\b|getInstance\(\s*\"(SSLv3|TLSv1|TLSv1\.1)\"\s*\)"
+    r"|SecurityProtocolType\.(Ssl3|Tls|Tls11)\b(?!\d)"
+    r"|^\s*ssl_protocols\b[^;#]*\b(SSLv3|TLSv1|TLSv1\.1)(?![.\d])")
 
 
 def scan_line(line: str) -> List[Dict[str, str]]:
@@ -98,7 +136,7 @@ def scan_line(line: str) -> List[Dict[str, str]]:
         pw_hash = True
         add("CRY-001", "high", "Fast hash used on a password",
             "MD5/SHA-1/plain SHA-2 are built to be fast; leaked hashes fall to GPU guessing in hours.",
-            "Hash passwords with argon2id, scrypt or bcrypt (or PBKDF2-HMAC-SHA256 at 600k iterations).")
+            "Hash passwords with argon2id, scrypt or bcrypt (or PBKDF2-HMAC-SHA256 at 600,000+ iterations).")
     if not pw_hash and MD5.search(line):
         add("CRY-002", "low", "MD5 in use",
             "Fine for non-security checksums and cache keys, broken for signatures, integrity against attackers or passwords.",
@@ -107,7 +145,7 @@ def scan_line(line: str) -> List[Dict[str, str]]:
         add("CRY-003", "low", "SHA-1 in use",
             "SHA-1 has practical collisions. Acceptable only where collisions do not matter (git object ids, legacy HMAC).",
             "Use SHA-256 or better.")
-    if ECB.search(line):
+    if ECB.search(RSA_ECB_LABEL.sub("RSA/", line)):
         add("CRY-010", "high", "ECB cipher mode",
             "ECB encrypts equal blocks to equal ciphertext, so patterns in the data stay visible.",
             "Use an AEAD mode: AES-GCM or ChaCha20-Poly1305 with a fresh random nonce per message.")
@@ -139,6 +177,51 @@ def scan_line(line: str) -> List[Dict[str, str]]:
         add("CRY-041", "medium", "Legacy 64-bit block cipher (3DES/Blowfish)",
             "64-bit blocks allow birthday attacks on long sessions (Sweet32); NIST disallowed 3DES for encryption after 2023.",
             "Use AES-GCM.")
+    if RSA_NO_PADDING.search(line):
+        add("CRY-012", "high", "RSA encryption without padding",
+            "Textbook RSA is deterministic and malleable: equal messages give equal ciphertext and an attacker "
+            "can change the plaintext in predictable ways.",
+            "Use RSA-OAEP with SHA-256 (RSA/ECB/OAEPWithSHA-256AndMGF1Padding, padding.OAEP, RSA_PKCS1_OAEP_PADDING), "
+            "or better, ECIES / HPKE or a hybrid scheme with AES-GCM.")
+    elif RSA_PKCS1_ENC.search(line):
+        add("CRY-012", "medium", "RSA PKCS#1 v1.5 encryption padding",
+            "PKCS#1 v1.5 decryption leaks through error messages and timing (Bleichenbacher, ROBOT, Marvin), letting "
+            "an attacker decrypt or forge with enough queries. Signing with PKCS#1 v1.5 is a different scheme and is fine.",
+            "Switch encryption to RSA-OAEP with SHA-256, or to a hybrid scheme (HPKE, AES-GCM with an ECDH key).")
+    if PBKDF2_CTX.search(line) or (re.search(r"iterations", line, I) and re.search(r"pbkdf|kdf|derive", line, I)):
+        for rx in PBKDF2_CALLS:
+            pm = rx.search(line)
+            if not pm:
+                continue
+            n = int(pm.group("n").replace("_", ""))
+            low = line.lower()
+            algo = "sha512" if re.search(r"sha-?512", low) else "sha1" if re.search(r"sha-?1\b|hmacsha1|sha1\.new", low) else "sha256"
+            need = PBKDF2_MIN[algo]
+            if n < need:
+                add("CRY-051", "high" if n < 10_000 else "medium",
+                    f"PBKDF2 with {n:,} iterations (HMAC-{algo.upper()})",
+                    f"OWASP's minimum for PBKDF2-HMAC-{algo.upper()} is {need:,} iterations. Fewer makes each leaked "
+                    "password hash cheap to guess on GPUs.",
+                    f"Raise to {need:,}+ iterations (rehash on next login), or move to argon2id / scrypt / bcrypt.")
+            break
+    for rx in BCRYPT_COST:
+        bm = rx.search(line)
+        if bm and 4 <= int(bm.group("n")) < BCRYPT_MIN_COST:
+            add("CRY-052", "medium", f"bcrypt cost {bm.group('n')} is below 10",
+                "Each step down halves the work an attacker needs per guess. OWASP sets 10 as the minimum.",
+                "Use cost 12 (or the highest your login latency allows, 10 at the least); old hashes upgrade on next login.")
+            break
+    else:
+        if GO_BCRYPT_MIN.search(line):
+            add("CRY-052", "medium", "bcrypt cost set to bcrypt.MinCost (4)",
+                "MinCost is meant for tests. Each step down halves the work an attacker needs per guess.",
+                "Use bcrypt.DefaultCost (10) or higher, 12 is common.")
+    if OLD_TLS_PIN.search(line):
+        add("CRY-061", "medium", "Code pins SSL 3.0, TLS 1.0 or TLS 1.1",
+            "These protocol versions are deprecated (RFC 8996) and fail PCI DSS. A client or server pinned to "
+            "them, or allowing them as the minimum, can be downgraded or refuse modern peers.",
+            "Use the library default context and set the minimum to TLS 1.2 (ssl.TLSVersion.TLSv1_2, "
+            "tls.VersionTLS12, minVersion: 'TLSv1.2', SSLContext.getInstance(\"TLSv1.3\")).")
     rsa = SMALL_RSA.search(line)
     if rsa:
         add("CRY-050", "high", f"Small key size ({rsa.group(2)} bits)",
@@ -235,6 +318,17 @@ HASH_PATTERNS = [
     (re.compile(r"^pbkdf2_sha(256|1)\$(\d+)\$[^$]+\$[A-Za-z0-9+/=]+$"), "pbkdf2 (Django)"),
     (re.compile(r"^\$pbkdf2(-sha(256|512))?\$(\d+)\$"), "pbkdf2 (passlib)"),
     (re.compile(r"^\*[0-9A-F]{40}$", I), "MySQL 4.1+ (double SHA-1)"),
+    (re.compile(r"^\$wp\$2[aby]\$(\d{2})\$[./A-Za-z0-9]{53}$"), "bcrypt (WordPress 6.8+)"),
+    (re.compile(r"^\$[PH]\$[./0-9A-Za-z]{31}$"), "phpass (portable, iterated MD5)"),
+    (re.compile(r"^\$S\$[./0-9A-Za-z]{52}$"), "Drupal 7 (iterated SHA-512)"),
+    (re.compile(r"^\{(SHA|SSHA|SHA256|SSHA256|SHA512|SSHA512|MD5|SMD5)\}[A-Za-z0-9+/=]+$", I), "LDAP"),
+]
+# Wrappers around a standard hash: strip the prefix and identify the rest.
+HASH_WRAPPERS = [
+    (re.compile(r"^\{CRYPT\}", I), "LDAP {CRYPT}"),
+    (re.compile(r"^argon2(?=\$argon2)"), "Django argon2"),
+    (re.compile(r"^bcrypt_sha256\$(?=\$2)"), "Django bcrypt_sha256"),
+    (re.compile(r"^bcrypt\$(?=\$2)"), "Django bcrypt"),
 ]
 HEX_LENGTHS = {
     32: (["MD5", "NTLM", "MD4", "LM"], "weak"),
@@ -249,6 +343,18 @@ HEX_LENGTHS = {
 def identify_hash(value: str) -> Dict[str, object]:
     """Name the likely format(s) of a hash string. Read-only: no cracking, no lookups."""
     s = value.strip()
+    for wrx, wname in HASH_WRAPPERS:
+        wm = wrx.match(s)
+        if wm and len(s) > wm.end():
+            inner = identify_hash(s[wm.end():])
+            if inner["candidates"]:
+                inner["input"] = mask(s)
+                inner["length"] = len(s)
+                inner["candidates"] = [f"{wname}: {c}" for c in inner["candidates"]]
+                if "sha256" in wname:
+                    inner["note"] = inner["note"].replace(" bcrypt only uses the first 72 bytes of a password.",
+                                                          " Pre-hashed with SHA-256, so the 72-byte limit does not apply.")
+                return inner
     result = {"input": mask(s) if len(s) > 8 else "***", "length": len(s), "candidates": [],
               "password_storage": "unknown", "params": {}, "note": ""}
     for rx, name in HASH_PATTERNS:
@@ -264,12 +370,13 @@ def identify_hash(value: str) -> Dict[str, object]:
             result["password_storage"] = "strong" if ok else "ok"
             result["note"] = "Meets the OWASP minimum (m=19 MiB, t=2)." if ok else \
                 "Below OWASP's argon2id minimum (m=19456 KiB, t=2, p=1) or not the id variant."
-        elif name == "bcrypt":
+        elif name.startswith("bcrypt"):
             cost = int(m.group(1))
             result["params"] = {"cost": cost}
             result["password_storage"] = "strong" if cost >= 10 else "ok"
             result["note"] = f"Cost {cost}." + ("" if cost >= 10 else " Raise to 10+ (12 is common today).") + \
-                " bcrypt only uses the first 72 bytes of a password."
+                (" WordPress pre-hashes with HMAC-SHA384, so the 72-byte limit does not apply."
+                 if "WordPress" in name else " bcrypt only uses the first 72 bytes of a password.")
         elif name.startswith("scrypt"):
             result["password_storage"] = "strong"
             if m.groups():
@@ -285,12 +392,31 @@ def identify_hash(value: str) -> Dict[str, object]:
         elif name in ("md5crypt", "apr1 (Apache md5crypt)", "MySQL 4.1+ (double SHA-1)"):
             result["password_storage"] = "weak"
             result["note"] = "Legacy scheme, fast to brute-force on GPUs. Rehash on next login."
+        elif name.startswith("phpass"):
+            result["params"] = {"log2_rounds": "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".index(s[3])}
+            result["password_storage"] = "weak"
+            result["note"] = ("Old WordPress / phpBB format: iterated MD5, fast on GPUs. "
+                              "WordPress 6.8+ rehashes these to $wp$2y$ (bcrypt) at the next login.")
+        elif name.startswith("Drupal"):
+            result["password_storage"] = "ok"
+            result["note"] = "Salted and iterated but GPU-friendly; Drupal 10.1+ uses PHP password_hash (bcrypt) for new hashes."
+        elif name == "LDAP":
+            scheme = s[1:s.index("}")].upper()
+            result["candidates"] = [f"LDAP {{{scheme}}}"]
+            result["password_storage"] = "weak"
+            salted = scheme in ("SSHA", "SSHA256", "SSHA512", "SMD5")
+            digest = {"SHA": "SHA-1", "SSHA": "SHA-1", "MD5": "MD5", "SMD5": "MD5"}.get(scheme, "SHA-" + scheme[-3:])
+            result["params"] = {"digest": digest, "salted": salted}
+            result["note"] = (f"One round of {'salted' if salted else 'unsalted'} {digest}, fast on GPUs. "
+                              "Use {ARGON2} or {CRYPT} with yescrypt/bcrypt if the directory server supports it.")
         elif name.startswith("pbkdf2"):
             iters = re.search(r"\$(\d+)\$", s)
             n = int(iters.group(1)) if iters else 0
-            result["params"] = {"iterations": n}
-            result["password_storage"] = "strong" if n >= 600000 else "ok"
-            result["note"] = "OWASP suggests 600,000 iterations for PBKDF2-HMAC-SHA256." if n < 600000 else ""
+            algo = "sha512" if "sha512" in s[:16] else "sha1" if (s.startswith("pbkdf2_sha1$") or s.startswith("$pbkdf2$")) else "sha256"
+            need = PBKDF2_MIN[algo]
+            result["params"] = {"iterations": n, "prf": "HMAC-" + algo.upper()}
+            result["password_storage"] = "strong" if n >= need else "ok"
+            result["note"] = (f"OWASP suggests {need:,} iterations for PBKDF2-HMAC-{algo.upper()}." if n < need else "")
         return result
     if re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) in HEX_LENGTHS:
         names, storage = HEX_LENGTHS[len(s)]

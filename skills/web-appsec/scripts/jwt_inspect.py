@@ -47,6 +47,10 @@ def decode(token: str) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
     return header, payload, parts[2]
 
 
+# Five minutes is the usual clock skew allowance verifiers apply to time claims
+CLOCK_SKEW = 300
+
+
 def analyze(header: Dict[str, Any], payload: Dict[str, Any], signature: str, now: Optional[float] = None) -> List[Dict[str, str]]:
     now = time.time() if now is None else now
     out = []
@@ -68,6 +72,10 @@ def analyze(header: Dict[str, Any], payload: Dict[str, Any], signature: str, now
         out.append(finding("JWT-004", "high", "Header embeds its own jwk",
                            "A verifier that trusts the embedded key accepts self-signed tokens.",
                            "Never verify with a key taken from the token itself."))
+    if "x5c" in header:
+        out.append(finding("JWT-006", "medium", "Header embeds an x5c certificate chain",
+                           "Safe only if the verifier validates the chain against pinned roots and checks the leaf identity; otherwise any self-made certificate signs valid tokens.",
+                           "Validate x5c against a fixed trust anchor and expected subject, or ignore it and use locally configured keys."))
     kid = header.get("kid")
     if isinstance(kid, str) and any(ch in kid for ch in ("/", "\\", "..", "'", '"', ";", "|")):
         out.append(finding("JWT-005", "medium", "kid contains path or query characters",
@@ -89,6 +97,11 @@ def analyze(header: Dict[str, Any], payload: Dict[str, Any], signature: str, now
             out.append(finding("JWT-012", "low", "Very long lifetime",
                                f"Valid for about {int(life // 86400)} days.",
                                "Keep access tokens short-lived (minutes to hours)."))
+    future = [c for c in ("iat", "nbf") if isinstance(payload.get(c), (int, float)) and payload[c] > now + CLOCK_SKEW]
+    if future:
+        out.append(finding("JWT-014", "low", f"{'/'.join(future)} lies in the future",
+                           f"{', '.join(c + '=' + _fmt(payload[c]) for c in future)}. Either the issuer clock is wrong or tokens are minted ahead of use.",
+                           "Sync issuer clocks (NTP) and reject tokens whose nbf/iat is beyond a small skew."))
     for claim in ("iss", "aud"):
         if claim not in payload:
             out.append(finding("JWT-013", "low", f"No {claim} claim",

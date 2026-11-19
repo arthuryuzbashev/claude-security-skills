@@ -62,3 +62,40 @@ resource "aws_db_instance" "main" {
   publicly_accessible         = false
   storage_encrypted           = true
 }
+
+resource "aws_instance" "worker" {
+  ami           = "ami-00000000000000000"
+  instance_type = "t3.micro"
+
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
+  root_block_device {
+    encrypted = true
+  }
+}
+
+resource "aws_kms_key" "app" {
+  description         = "app data key"
+  enable_key_rotation = true
+}
+
+resource "aws_eks_cluster" "main" {
+  name     = "main"
+  role_arn = "arn:aws:iam::123456789012:role/eks"
+
+  vpc_config {
+    subnet_ids              = ["subnet-00000000"]
+    endpoint_private_access = true
+    endpoint_public_access  = false
+  }
+}
+
+resource "aws_cloudtrail" "main" {
+  name                       = "main"
+  s3_bucket_name             = "example-test-trail"
+  is_multi_region_trail      = true
+  enable_log_file_validation = true
+}

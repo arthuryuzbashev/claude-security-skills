@@ -1,6 +1,6 @@
 # OWASP MASVS v2 checklist
 
-MASVS v2 has 8 categories and 24 controls. The MASTG (testing guide) holds the test cases; the MAS testing profiles (L1, L2, R) say which controls apply to which app. Check the current MASVS release on mas.owasp.org for any wording changes; the control IDs below are stable in v2.
+MASVS v2 has 8 categories and 24 controls. Versions checked 2026-11-19 on github.com/OWASP: MASVS v2.1.0 (2024-01-18, the release that added MASVS-PRIVACY), MASTG v2.0.0 (2026-06-30, the test cases, now tied to weaknesses) and MASWE v1.0.0 (2026-08-17, the Mobile Application Security Weakness Enumeration that sits between a control and its tests). The MAS testing profiles (L1, L2, R, P) say which controls apply to which app. The control IDs below are stable across v2.x.
 
 Columns: what to look at on each platform, and which script finding points at the control (category-level tags in the `masvs` field).
 
@@ -37,7 +37,7 @@ Columns: what to look at on each platform, and which script finding points at th
 
 | Control | Check | Script |
 |---|---|---|
-| PLATFORM-1: IPC mechanisms used securely | Exported components, permissions with signature level, pending intents immutable, deep link parameter validation, URL schemes, universal links/App Links verification | AND-020..024, AND-032, AND-040, AND-041, IOS-010, IOS-042 |
+| PLATFORM-1: IPC mechanisms used securely | Exported components, permissions with signature level, pending intents immutable, deep link parameter validation, URL schemes, universal links/App Links verification, task affinity and reparenting, shared user IDs | AND-020..024, AND-032, AND-040, AND-041, AND-052, AND-053, IOS-010, IOS-042 |
 | PLATFORM-2: WebViews used securely | JavaScript only when needed, no `addJavascriptInterface` / message handlers exposed to untrusted pages, file access off, HTTPS content only | IOS-002 |
 | PLATFORM-3: user interface used securely | Sensitive screens hidden from screenshots/app switcher (`FLAG_SECURE`), tapjacking protection, masked input | AND-031 (overlay permission) |
 
@@ -45,7 +45,7 @@ Columns: what to look at on each platform, and which script finding points at th
 
 | Control | Check | Script |
 |---|---|---|
-| CODE-1: requires an up-to-date platform version | Reasonable minSdk / MinimumOSVersion, current targetSdk | AND-016, AND-050 |
+| CODE-1: requires an up-to-date platform version | Reasonable minSdk / MinimumOSVersion, targetSdk at Google Play's level (API 36 for new apps and updates since 2026-08-31, 35 for existing apps; Wear OS and Automotive 35, TV 34) | AND-016, AND-050, AND-051 |
 | CODE-2: mechanism to enforce app updates | Server-side minimum version, in-app update prompt | none |
 | CODE-3: only components without known vulnerabilities | Dependency inventory and advisories (Gradle, CocoaPods, SPM) | none |
 | CODE-4: validates and sanitizes all untrusted input | Intent extras, deep link params, IPC, file imports, SQL, WebView URLs | AND-020..023 detail text |
@@ -68,9 +68,21 @@ Applies when the threat model includes tampering or reverse engineering (MAS-R p
 | Control | Check | Script |
 |---|---|---|
 | PRIVACY-1: minimizes access to sensitive data and resources | Only needed permissions, coarse instead of fine location, photo picker instead of storage | AND-030, AND-031, IOS-022 |
-| PRIVACY-2: prevents identification of the user | No stable device IDs for tracking without consent, ATT on iOS where required | none |
-| PRIVACY-3: transparent about data collection and usage | Clear purpose strings, Play Data safety form and App Store privacy labels match behavior, privacy manifest (`PrivacyInfo.xcprivacy`) | IOS-020 |
+| PRIVACY-2: prevents identification of the user | No stable device IDs for tracking without consent, ATT on iOS where required, tracking domains declared so iOS blocks them until the user allows tracking, required reason APIs (fingerprinting surface) used only for an approved reason | IOS-050, IOS-052 |
+| PRIVACY-3: transparent about data collection and usage | Clear purpose strings, Play Data safety form and App Store privacy labels match behavior, privacy manifest (`PrivacyInfo.xcprivacy`) complete and consistent, every bundled SDK ships its own manifest | IOS-020, IOS-051, IOS-053 |
 | PRIVACY-4: offers user control over their data | Account and data deletion, consent withdrawal | none |
+
+## Privacy manifest quick reference (Apple, checked 2026-11-19)
+
+Top-level keys: `NSPrivacyTracking`, `NSPrivacyTrackingDomains`, `NSPrivacyCollectedDataTypes` (each entry: `NSPrivacyCollectedDataType`, `...Linked`, `...Tracking`, `...Purposes`), `NSPrivacyAccessedAPITypes` (each entry: `NSPrivacyAccessedAPIType` plus `NSPrivacyAccessedAPITypeReasons`). Uploads that use required reason APIs without a declaration are rejected since May 1, 2024 (ITMS-91053).
+
+| Category (`NSPrivacyAccessedAPICategory...`) | Approved reasons |
+|---|---|
+| FileTimestamp | DDA9.1 show to user, C617.1 own container, 3B52.1 user-picked files, 0A2A.1 SDK wrapper only |
+| SystemBootTime | 35F9.1 elapsed time, 8FFB.1 absolute event timestamps, 3D61.1 user-submitted bug report |
+| DiskSpace | 85F4.1 show to user, E174.1 check before writing, 7D9E.1 bug report, B728.1 health research apps |
+| ActiveKeyboards | 3EC4.1 custom keyboard apps, 54BD.1 adapt the UI |
+| UserDefaults | CA92.1 own app, 1C8F.1 App Group, C56D.1 SDK wrapper only, AC6B.1 managed app configuration (MDM) |
 
 ## Quick release gate
 

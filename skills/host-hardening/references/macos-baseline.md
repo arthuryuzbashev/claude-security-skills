@@ -1,6 +1,6 @@
 # macOS baseline
 
-A practical baseline for Macs used for work (laptops, desktops, build machines). In the spirit of the CIS macOS benchmark and Apple's Platform Security guide; benchmark section numbers are left out on purpose.
+A practical baseline for Macs used for work (laptops, desktops, build machines). In the spirit of the CIS macOS benchmarks (latest at the last check, 2026-11-19: CIS Apple macOS 26 Tahoe v1.1.0) and Apple's Platform Security guide; benchmark section numbers are left out on purpose.
 
 On managed fleets, set these with an MDM configuration profile instead of by hand, so they cannot drift. Hand fixes are for single Macs.
 
@@ -17,6 +17,7 @@ On managed fleets, set these with an MDM configuration profile instead of by han
 | Security responses (MAC-013) | same | `CriticalUpdateInstall` not 0 | Automatic Updates: Install Security Responses and system files |
 | Config data (MAC-014) | same | `ConfigDataInstall` not 0 | same toggle as above |
 | Auto download (MAC-015) | same | `AutomaticDownload` not 0 | Automatic Updates: Download new updates when available |
+| Auto install macOS updates (MAC-016) | same | `AutomaticallyInstallMacOSUpdates` not 0 | Automatic Updates: Install macOS updates |
 | Screen lock (MAC-007) | `sysadminctl -screenLock status` (prints on stderr) | `screenLock delay is immediate` (or 5 s or less) | Lock Screen > Require password: Immediately |
 | Remote Login (MAC-008) | `sudo systemsetup -getremotelogin` | `Remote Login: Off` | Sharing > Remote Login off, or limit to named users |
 | Screen Sharing (MAC-009) | `launchctl print-disabled system` | `com.apple.screensharing` not enabled | Sharing > Screen Sharing off |
@@ -53,7 +54,7 @@ These are worth checking by hand or via MDM; the script does not cover them:
 | FileVault | `com.apple.MCX.FileVault2` plus recovery key escrow |
 | Firewall and stealth | `com.apple.security.firewall` (`EnableFirewall`, `EnableStealthMode`) |
 | Gatekeeper | `com.apple.systempolicy.control` |
-| Software Update | `com.apple.SoftwareUpdate` (`AutomaticCheckEnabled`, `AutomaticDownload`, `CriticalUpdateInstall`, `ConfigDataInstall`) |
+| Software Update | `com.apple.SoftwareUpdate` (`AutomaticCheckEnabled`, `AutomaticDownload`, `CriticalUpdateInstall`, `ConfigDataInstall`, `AutomaticallyInstallMacOSUpdates`), or a Declarative Device Management software update enforcement with a deadline |
 | Screen lock | `com.apple.screensaver` (`askForPassword`, `askForPasswordDelay`) |
 | Guest | `com.apple.loginwindow` (`DisableGuestAccount`) |
 

@@ -1,11 +1,26 @@
 # Running a threat modeling session
 
+Contents: the four questions and picking a method, before the session, questions 1 to 4, when to model again,
+model file template, notes template.
+
 The session follows Adam Shostack's four questions (also the backbone of the Threat Modeling Manifesto):
 
 1. What are we working on?
 2. What can go wrong?
 3. What are we going to do about it?
 4. Did we do a good enough job?
+
+These are also the questions of the OWASP Threat Modeling Cheat Sheet, which adds: model at design time, keep the model
+next to the code and revisit it when the design changes.
+
+Picking a method:
+
+| Method | Use it for | In this skill |
+|---|---|---|
+| STRIDE (per element) | Security threats for a feature or service; fast, engineer friendly | Default output of `stride_model.py` |
+| LINDDUN | Privacy threats where personal data flows; feeds a DPIA | `--privacy` adds the LINDDUN threats |
+| PASTA (7 stages: objectives, technical scope, decomposition, threat analysis, weakness analysis, attack modeling, risk and impact) | Risk-centric, business-impact driven reviews of a whole application; heavier and slower | Use the STRIDE output as stage 4 to 5 input, score business impact in `grc-compliance` |
+| Attack trees | One high-value goal ("steal card data") explored in depth | Draw by hand from the flags |
 
 Keep it to 60-90 minutes per system or feature. Bring an engineer who built it, someone who runs it, and someone from security. A product owner helps with question 3.
 

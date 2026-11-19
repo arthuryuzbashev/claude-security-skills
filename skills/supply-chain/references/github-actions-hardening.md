@@ -1,6 +1,19 @@
 # GitHub Actions hardening
 
 Each section: the risk, the safe pattern, and the matching `ci_audit.py` rule.
+Platform facts checked 2026-11-19 against the GitHub changelog and docs.
+
+## Contents
+
+1. Pin actions to a commit SHA
+2. Triggers that run with secrets
+3. Script injection
+4. Token permissions
+5. Secrets
+6. Runners
+7. Other checks
+8. Known incidents and indicators
+9. Platform controls (2025-2026)
 
 ## 1. Pin actions to a commit SHA (GHA-001)
 
@@ -24,7 +37,8 @@ Tags and branches are mutable. In March 2025 the tags of `tj-actions/changed-fil
       schedule: {interval: weekly}
   ```
 - A pinned action can still pull unpinned things at run time (a Docker image by tag, a script by URL). Read what the action does
-- Org/repo setting "Require actions to be pinned to a full-length commit SHA" and an allow-list of actions enforce this centrally
+- Org/repo setting "Require actions to be pinned to a full-length commit SHA" (allowed actions policy, added 2025-08-15) and an allow-list of actions enforce this centrally; the same policy can block named actions or versions
+- Workflow lockfiles (`gh actions-lock`, GA 2026-10-28) record the resolved SHA of every action, including nested ones in composite actions and reusable workflows; commit the lockfile and review its diffs like a package lockfile
 
 ## 2. Triggers that run with secrets (GHA-002, GHA-003)
 
@@ -59,7 +73,12 @@ on:
     types: [completed]
 ```
 
-Validate the artifact (size, file types, no paths outside the target dir) before using it.
+Validate the artifact (size, file types, no paths outside the target dir) before using it. `ci_audit.py` flags `workflow_run` plus `download-artifact` as GHA-032 so someone checks this.
+
+`actions/checkout` v7.0.0 (2026-06-18) refuses to check out fork PR code under `pull_request_target` and `workflow_run`; the same guard was backported on 2026-07-20 to v6.1.0, v5.1.0, v4.4.0, v3.7.0 and v2.8.0. It is a seat belt, not a fix:
+- `allow-unsafe-pr-checkout: true` turns it off (GHA-004). Remove the input; if a maintainer really needs PR code, run it in an unprivileged `pull_request` job
+- It only guards the checkout action. `gh pr checkout`, `git fetch origin pull/N/head`, `refs/pull/...` in `run:` and `issue_comment` bots that pass a PR ref still bring PR code in (GHA-005)
+- Older pins below the backport versions have no guard at all, so keep checkout current through Dependabot
 
 ## 3. Script injection (GHA-010)
 
@@ -122,6 +141,29 @@ jobs:
 
 - `curl | sh` in steps (GHA-040): download, verify checksum, run
 - `ACTIONS_ALLOW_UNSECURE_COMMANDS` (GHA-041): remove; use `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_PATH`
-- Writing untrusted data to `$GITHUB_ENV` or `$GITHUB_PATH` lets it set variables like `LD_PRELOAD` or `NODE_OPTIONS` for later steps
+- Writing to `$GITHUB_ENV` or `$GITHUB_PATH` in a privileged-trigger workflow (GHA-011): untrusted data there sets `LD_PRELOAD`, `NODE_OPTIONS` or `PATH` for every later step. Use `$GITHUB_OUTPUT` and pass values explicitly through `env:`
+- `secrets: inherit` on a reusable workflow call (GHA-022) hands every secret to the called workflow. Pass only the ones it needs under `secrets:`
+- Container or service `credentials.password` written as a literal (GHA-043). Use `${{ secrets.REGISTRY_TOKEN }}`
+- `curl`/`wget` over `http://` (GHA-044): a network attacker can swap the file. Use HTTPS and check a checksum
 - Caches are shared across branches with restore rules; do not cache build outputs from untrusted PRs into keys trusted jobs restore
 - Protect `.github/workflows/` with CODEOWNERS and branch protection
+
+## 8. Known incidents and indicators
+
+| Incident | Date | What to check | Rule |
+|---|---|---|---|
+| `tj-actions/changed-files` (CVE-2025-30066, in CISA KEV) | 2025-03 | any use; malicious commit `0e58ed8...`. Rotate secrets from runs between 2025-03-14 and 2025-03-15 | GHA-042 |
+| `reviewdog/action-setup@v1` (CVE-2025-30154, in KEV) | 2025-03-11 | `@v1` of action-setup and the reviewdog actions that call it | GHA-042 |
+| Shai-Hulud npm worm | 2025-09-15 | `.github/workflows/shai-hulud-workflow.yml` in any repo | GHA-045 |
+| Shai-Hulud 2.0 | 2025-11-24 | `.github/workflows/discussion.yaml` on `discussion` events, a self-hosted runner named `SHA1HULUD` | GHA-045 |
+
+A GHA-045 hit means a token with repo write access was stolen. Rotate GitHub, npm and cloud tokens first, remove unknown self-hosted runners in repo and org settings, then delete the file.
+
+## 9. Platform controls (2025-2026)
+
+- SHA pinning and block lists in the allowed actions policy (2025-08-15)
+- Workflow execution protections (GA 2026-09-17, enforced by default from 2026-12-02): stops untrusted events from running privileged workflows unless a maintainer approves. Check your org settings before the default flips
+- Workflow lockfiles with `gh actions-lock` (GA 2026-10-28)
+- `actions/checkout` fork PR guard (v7.0.0 and backports, see section 2)
+- npm trusted publishing (OIDC) removes long-lived npm tokens from CI; see `dependency-hygiene.md`
+- Static audit: `zizmor` (docs.zizmor.sh) covers more patterns than `ci_audit.py` (template injection data flow, cache poisoning, impostor commits) and is worth running in CI next to it

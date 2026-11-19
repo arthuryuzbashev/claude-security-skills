@@ -2,7 +2,9 @@
 """Print ready-made hunting queries in Splunk SPL, Microsoft KQL and Elastic ES|QL / EQL.
 
 A small library of common use cases (brute force, password spray, new admin
-user, encoded PowerShell, LSASS dumping, ...). Each query names the data
+user, encoded PowerShell, LSASS dumping, Entra ID MFA fatigue, OAuth consent,
+device code sign-ins, AWS root and no-MFA console sign-ins, CloudTrail
+tampering, new access keys, ...). ATT&CK IDs follow v20. Each query names the data
 source and field names it assumes; adjust index names and fields to your
 environment before running it.
 
@@ -12,6 +14,7 @@ Usage:
   query_translate.py encoded-powershell --lang kql
   query_translate.py password-spray --lang all --json
   query_translate.py ssh-brute-force --threshold 20 --window 10
+  query_translate.py mfa-fatigue --lang kql
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import sys
 from typing import Dict, List
 
 LANGS = ["spl", "kql", "esql", "eql"]
+EQL_MAX_RUNS = 100  # Elastic EQL accepts `with runs=` from 1 to 100
 LANG_NAMES = {"spl": "Splunk SPL", "kql": "Microsoft KQL (Sentinel / Defender)",
               "esql": "Elastic ES|QL", "eql": "Elastic EQL"}
 
@@ -219,7 +223,7 @@ LIBRARY: Dict[str, Dict] = {
     },
     "log-cleared": {
         "title": "Windows event log cleared",
-        "attack": ["T1070.001"],
+        "attack": ["T1685.005"],
         "defaults": {},
         "sources": {"spl": "Windows Security (1102) and System (104) logs",
                     "kql": "SecurityEvent (1102) and Event (System 104) tables",
@@ -262,6 +266,203 @@ LIBRARY: Dict[str, Dict] = {
                  '| WHERE hits >= {threshold}\n'
                  '| SORT hits DESC'),
         "eql": 'any where user_agent.original : ("*sqlmap*", "*nikto*", "*nuclei*", "*wpscan*", "*gobuster*", "*ffuf*", "*feroxbuster*")',
+    },
+    "mfa-fatigue": {
+        "title": "Entra ID MFA fatigue: repeated denied MFA prompts for one user",
+        "attack": ["T1621"],
+        "defaults": {"threshold": 3, "window": 60},
+        "sources": {"spl": "Entra ID sign-in logs via Event Hub, Splunk Add-on for Microsoft Cloud Services (azure:monitor:aad)",
+                    "kql": "SigninLogs table (Sentinel)",
+                    "esql": "Elastic Azure integration, logs-azure.signinlogs-*",
+                    "eql": "Elastic Azure integration, azure.signinlogs events"},
+        "spl": ('index=* sourcetype="azure:monitor:aad" category=SignInLogs\n'
+                '  (properties.status.errorCode=500121 OR properties.status.errorCode=0)\n'
+                '| bin _time span={window}m\n'
+                '| stats count(eval(\'properties.status.errorCode\'==500121)) AS denied\n'
+                '        count(eval(\'properties.status.errorCode\'==0)) AS successes\n'
+                '        values(properties.ipAddress) AS ips BY _time, properties.userPrincipalName\n'
+                '| where denied >= {threshold}\n'
+                '| sort - denied'),
+        "kql": ('SigninLogs\n'
+                '| where ResultType in ("500121", "0")\n'
+                '| summarize Denied = countif(ResultType == "500121"), Successes = countif(ResultType == "0"),\n'
+                '    IPs = make_set(IPAddress, 10), Apps = make_set(AppDisplayName, 10)\n'
+                '    by UserPrincipalName, bin(TimeGenerated, {window}m)\n'
+                '| where Denied >= {threshold}\n'
+                '| order by Denied desc'),
+        "esql": ('FROM logs-azure.signinlogs-*\n'
+                 '| WHERE azure.signinlogs.properties.status.error_code IN (500121, 0)\n'
+                 '| EVAL bucket = DATE_TRUNC({window} minutes, @timestamp),\n'
+                 '       denied = CASE(azure.signinlogs.properties.status.error_code == 500121, 1, 0),\n'
+                 '       ok = CASE(azure.signinlogs.properties.status.error_code == 0, 1, 0)\n'
+                 '| STATS denied = SUM(denied), successes = SUM(ok) BY azure.signinlogs.properties.user_principal_name, bucket\n'
+                 '| WHERE denied >= {threshold}\n'
+                 '| SORT denied DESC'),
+        "eql": ('sequence by azure.signinlogs.properties.user_principal_name with maxspan={window}m\n'
+                '  [any where event.dataset == "azure.signinlogs" and azure.signinlogs.properties.status.error_code == 500121] with runs={threshold}\n'
+                '  [any where event.dataset == "azure.signinlogs" and azure.signinlogs.properties.status.error_code == 0]'),
+    },
+    "oauth-consent": {
+        "title": "OAuth app consent with high-risk permissions (Entra ID)",
+        "attack": ["T1528"],
+        "defaults": {},
+        "sources": {"spl": "Entra ID audit logs via Event Hub (azure:monitor:aad)",
+                    "kql": "AuditLogs table (Sentinel)",
+                    "esql": "Elastic Azure integration, logs-azure.auditlogs-*",
+                    "eql": "Elastic Azure integration, azure.auditlogs events"},
+        "spl": ('index=* sourcetype="azure:monitor:aad" operationName="Consent to application"\n'
+                '| spath output=perms path=properties.targetResources{{}}.modifiedProperties{{}}.newValue\n'
+                '| where match(mvjoin(perms, " "), "(?i)Mail\\.(Read|ReadWrite|Send)|Files\\.ReadWrite\\.All|Sites\\.ReadWrite\\.All|Directory\\.ReadWrite\\.All|offline_access")\n'
+                '| table _time, properties.initiatedBy.user.userPrincipalName, properties.targetResources{{}}.displayName, perms'),
+        "kql": ('AuditLogs\n'
+                '| where OperationName == "Consent to application"\n'
+                '| extend User = tostring(InitiatedBy.user.userPrincipalName), App = tostring(TargetResources[0].displayName)\n'
+                '| mv-expand Prop = TargetResources[0].modifiedProperties\n'
+                '| where tostring(Prop.displayName) == "ConsentAction.Permissions"\n'
+                '| extend Permissions = tostring(Prop.newValue)\n'
+                '| where Permissions matches regex @"(?i)Mail\\.(Read|ReadWrite|Send)|Files\\.ReadWrite\\.All|Sites\\.ReadWrite\\.All|Directory\\.ReadWrite\\.All|offline_access"\n'
+                '| project TimeGenerated, User, App, Permissions, Result'),
+        "esql": ('FROM logs-azure.auditlogs-*\n'
+                 '| WHERE azure.auditlogs.operation_name == "Consent to application"\n'
+                 '| KEEP @timestamp, azure.auditlogs.operation_name, azure.auditlogs.properties.initiated_by.user.*,\n'
+                 '    azure.auditlogs.properties.target_resources.*\n'
+                 '| SORT @timestamp DESC'),
+        "eql": 'any where event.dataset == "azure.auditlogs" and azure.auditlogs.operation_name == "Consent to application"',
+    },
+    "device-code-signin": {
+        "title": "Successful sign-in with the OAuth device code flow (Entra ID)",
+        "attack": ["T1528", "T1566.002"],
+        "defaults": {},
+        "sources": {"spl": "Entra ID sign-in logs via Event Hub (azure:monitor:aad)",
+                    "kql": "SigninLogs table (Sentinel)",
+                    "esql": "Elastic Azure integration, logs-azure.signinlogs-*",
+                    "eql": "Elastic Azure integration, azure.signinlogs events"},
+        "spl": ('index=* sourcetype="azure:monitor:aad" category=SignInLogs\n'
+                '  properties.authenticationProtocol=deviceCode properties.status.errorCode=0\n'
+                '| stats count values(properties.appDisplayName) AS apps values(properties.ipAddress) AS ips BY properties.userPrincipalName'),
+        "kql": ('SigninLogs\n'
+                '| where AuthenticationProtocol == "deviceCode" and ResultType == "0"\n'
+                '| summarize SignIns = count(), Apps = make_set(AppDisplayName, 10), IPs = make_set(IPAddress, 10),\n'
+                '    First = min(TimeGenerated) by UserPrincipalName\n'
+                '| order by SignIns desc'),
+        "esql": ('FROM logs-azure.signinlogs-*\n'
+                 '| WHERE azure.signinlogs.properties.authentication_protocol == "deviceCode"\n'
+                 '    AND azure.signinlogs.properties.status.error_code == 0\n'
+                 '| STATS signins = COUNT(*), apps = VALUES(azure.signinlogs.properties.app_display_name)\n'
+                 '    BY azure.signinlogs.properties.user_principal_name, source.ip'),
+        "eql": ('any where event.dataset == "azure.signinlogs" and\n'
+                '  azure.signinlogs.properties.authentication_protocol == "deviceCode" and\n'
+                '  azure.signinlogs.properties.status.error_code == 0'),
+    },
+    "entra-password-spray": {
+        "title": "Password spray against Entra ID (one IP, many users, bad password)",
+        "attack": ["T1110.003"],
+        "defaults": {"threshold": 10, "window": 60},
+        "sources": {"spl": "Entra ID sign-in logs via Event Hub (azure:monitor:aad)",
+                    "kql": "SigninLogs table (Sentinel)",
+                    "esql": "Elastic Azure integration, logs-azure.signinlogs-*",
+                    "eql": "not a good fit for EQL (needs distinct counts); use ES|QL"},
+        "spl": ('index=* sourcetype="azure:monitor:aad" category=SignInLogs\n'
+                '  (properties.status.errorCode=50126 OR properties.status.errorCode=50053)\n'
+                '| bin _time span={window}m\n'
+                '| stats dc(properties.userPrincipalName) AS users count AS attempts BY _time, properties.ipAddress\n'
+                '| where users >= {threshold}\n'
+                '| sort - users'),
+        "kql": ('SigninLogs\n'
+                '| where ResultType in ("50126", "50053")\n'
+                '| summarize Users = dcount(UserPrincipalName), Attempts = count(), Apps = make_set(AppDisplayName, 5)\n'
+                '    by IPAddress, bin(TimeGenerated, {window}m)\n'
+                '| where Users >= {threshold}\n'
+                '| order by Users desc'),
+        "esql": ('FROM logs-azure.signinlogs-*\n'
+                 '| WHERE azure.signinlogs.properties.status.error_code IN (50126, 50053)\n'
+                 '| EVAL bucket = DATE_TRUNC({window} minutes, @timestamp)\n'
+                 '| STATS users = COUNT_DISTINCT(azure.signinlogs.properties.user_principal_name), attempts = COUNT(*) BY source.ip, bucket\n'
+                 '| WHERE users >= {threshold}\n'
+                 '| SORT users DESC'),
+        "eql": None,
+    },
+    "aws-console-login-risk": {
+        "title": "AWS console sign-in as root, or by an IAM user without MFA",
+        "attack": ["T1078.004"],
+        "defaults": {},
+        "sources": {"spl": "AWS CloudTrail, Splunk Add-on for AWS (aws:cloudtrail)",
+                    "kql": "AWSCloudTrail table (Sentinel)",
+                    "esql": "Elastic AWS integration, logs-aws.cloudtrail-*",
+                    "eql": "Elastic AWS integration, aws.cloudtrail events"},
+        "spl": ('index=* sourcetype=aws:cloudtrail eventName=ConsoleLogin\n'
+                '  (userIdentity.type=Root OR additionalEventData.MFAUsed=No)\n'
+                '| table _time, userIdentity.type, userIdentity.arn, sourceIPAddress, responseElements.ConsoleLogin, additionalEventData.MFAUsed, userAgent\n'
+                '| sort - _time'),
+        "kql": ('AWSCloudTrail\n'
+                '| where EventName == "ConsoleLogin"\n'
+                '| extend Result = tostring(parse_json(ResponseElements).ConsoleLogin),\n'
+                '    MfaUsed = tostring(parse_json(AdditionalEventData).MFAUsed)\n'
+                '| where UserIdentityType == "Root" or (UserIdentityType == "IAMUser" and MfaUsed == "No")\n'
+                '| project TimeGenerated, UserIdentityType, UserIdentityArn, SourceIpAddress, Result, MfaUsed, UserAgent\n'
+                '| order by TimeGenerated desc'),
+        "esql": ('FROM logs-aws.cloudtrail-*\n'
+                 '| WHERE event.action == "ConsoleLogin"\n'
+                 '    AND (aws.cloudtrail.user_identity.type == "Root"\n'
+                 '         OR aws.cloudtrail.console_login.additional_eventdata.mfa_used == false)\n'
+                 '| KEEP @timestamp, aws.cloudtrail.user_identity.type, aws.cloudtrail.user_identity.arn, source.ip, event.outcome\n'
+                 '| SORT @timestamp DESC'),
+        "eql": ('any where event.dataset == "aws.cloudtrail" and event.action == "ConsoleLogin" and\n'
+                '  (aws.cloudtrail.user_identity.type == "Root" or aws.cloudtrail.console_login.additional_eventdata.mfa_used == false)'),
+    },
+    "cloudtrail-tampering": {
+        "title": "CloudTrail logging stopped, deleted or changed",
+        "attack": ["T1685.002"],
+        "defaults": {},
+        "sources": {"spl": "AWS CloudTrail, Splunk Add-on for AWS (aws:cloudtrail)",
+                    "kql": "AWSCloudTrail table (Sentinel)",
+                    "esql": "Elastic AWS integration, logs-aws.cloudtrail-*",
+                    "eql": "Elastic AWS integration, aws.cloudtrail events"},
+        "spl": ('index=* sourcetype=aws:cloudtrail eventSource=cloudtrail.amazonaws.com\n'
+                '  eventName IN (StopLogging, DeleteTrail, UpdateTrail, PutEventSelectors, DeleteEventDataStore, StopEventDataStoreIngestion)\n'
+                '| table _time, eventName, userIdentity.arn, sourceIPAddress, requestParameters.name, errorCode\n'
+                '| sort - _time'),
+        "kql": ('AWSCloudTrail\n'
+                '| where EventSource == "cloudtrail.amazonaws.com"\n'
+                '| where EventName in ("StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors", "DeleteEventDataStore", "StopEventDataStoreIngestion")\n'
+                '| project TimeGenerated, EventName, UserIdentityArn, SourceIpAddress, RequestParameters, ErrorCode\n'
+                '| order by TimeGenerated desc'),
+        "esql": ('FROM logs-aws.cloudtrail-*\n'
+                 '| WHERE event.provider == "cloudtrail.amazonaws.com"\n'
+                 '    AND event.action IN ("StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors", "DeleteEventDataStore", "StopEventDataStoreIngestion")\n'
+                 '| KEEP @timestamp, event.action, aws.cloudtrail.user_identity.arn, source.ip, event.outcome\n'
+                 '| SORT @timestamp DESC'),
+        "eql": ('any where event.dataset == "aws.cloudtrail" and event.provider == "cloudtrail.amazonaws.com" and\n'
+                '  event.action in ("StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors", "DeleteEventDataStore", "StopEventDataStoreIngestion")'),
+    },
+    "aws-access-key-created": {
+        "title": "New IAM access key or console password created (AWS)",
+        "attack": ["T1098.001"],
+        "defaults": {},
+        "sources": {"spl": "AWS CloudTrail, Splunk Add-on for AWS (aws:cloudtrail)",
+                    "kql": "AWSCloudTrail table (Sentinel)",
+                    "esql": "Elastic AWS integration, logs-aws.cloudtrail-*",
+                    "eql": "Elastic AWS integration, aws.cloudtrail events"},
+        "spl": ('index=* sourcetype=aws:cloudtrail eventSource=iam.amazonaws.com\n'
+                '  eventName IN (CreateAccessKey, CreateLoginProfile, UpdateLoginProfile) NOT errorCode=*\n'
+                '| eval target=coalesce(\'requestParameters.userName\', \'userIdentity.userName\')\n'
+                '| eval for_other=if(target!=\'userIdentity.userName\', "yes", "no")\n'
+                '| table _time, eventName, userIdentity.arn, target, for_other, sourceIPAddress'),
+        "kql": ('AWSCloudTrail\n'
+                '| where EventSource == "iam.amazonaws.com"\n'
+                '| where EventName in ("CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile") and isempty(ErrorCode)\n'
+                '| extend Target = tostring(parse_json(RequestParameters).userName)\n'
+                '| extend ForOther = isnotempty(Target) and Target != UserIdentityUserName\n'
+                '| project TimeGenerated, EventName, UserIdentityArn, Target, ForOther, SourceIpAddress\n'
+                '| order by TimeGenerated desc'),
+        "esql": ('FROM logs-aws.cloudtrail-*\n'
+                 '| WHERE event.provider == "iam.amazonaws.com"\n'
+                 '    AND event.action IN ("CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile")\n'
+                 '    AND event.outcome == "success"\n'
+                 '| KEEP @timestamp, event.action, aws.cloudtrail.user_identity.arn, aws.cloudtrail.request_parameters, source.ip\n'
+                 '| SORT @timestamp DESC'),
+        "eql": ('any where event.dataset == "aws.cloudtrail" and event.provider == "iam.amazonaws.com" and\n'
+                '  event.action in ("CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile") and event.outcome == "success"'),
     },
 }
 
@@ -321,13 +522,28 @@ def lint_query(query: str, lang: str) -> List[str]:
     return problems
 
 
+def eql_runs_note(use_case: str, threshold=None):
+    """EQL `with runs=` only accepts 1 to 100. Return a note when the threshold goes past that."""
+    q = LIBRARY[use_case].get("eql")
+    if not q or "runs={threshold}" not in q:
+        return None
+    value = threshold if threshold is not None else LIBRARY[use_case].get("defaults", {}).get("threshold", 10)
+    if value > EQL_MAX_RUNS:
+        return (f"EQL `with runs=` accepts 1 to {EQL_MAX_RUNS}; threshold {value} is too high. "
+                "Use the ES|QL query, or lower --threshold.")
+    return None
+
+
 def build(use_case: str, langs: List[str], threshold=None, window=None) -> Dict:
     uc = LIBRARY[use_case]
     queries = {}
     for lang in langs:
-        q = render_query(use_case, lang, threshold, window)
+        note = eql_runs_note(use_case, threshold) if lang == "eql" else None
+        q = None if note else render_query(use_case, lang, threshold, window)
         queries[lang] = {"query": q, "source": uc["sources"].get(lang, ""),
                          "available": q is not None}
+        if note:
+            queries[lang]["note"] = note
     return {"use_case": use_case, "title": uc["title"], "attack": uc["attack"], "queries": queries}
 
 
@@ -335,7 +551,7 @@ def render_text(result: Dict) -> str:
     out = [f"{result['use_case']}: {result['title']}", f"ATT&CK: {', '.join(result['attack'])}", ""]
     for lang, q in result["queries"].items():
         out.append(f"--- {LANG_NAMES[lang]}  (data: {q['source']})")
-        out.append(q["query"] if q["available"] else "(no query for this language)")
+        out.append(q["query"] if q["available"] else "(no query for this language" + (": " + q["note"] if q.get("note") else "") + ")")
         out.append("")
     return "\n".join(out).rstrip()
 
@@ -355,7 +571,7 @@ def main(argv=None) -> int:
             print(json.dumps([{"use_case": k, "title": v["title"], "attack": v["attack"]} for k, v in LIBRARY.items()], indent=2))
         else:
             for k, v in LIBRARY.items():
-                print(f"{k:22} {v['title']}  [{', '.join(v['attack'])}]")
+                print(f"{k:24} {v['title']}  [{', '.join(v['attack'])}]")
         return 0 if args.list else 2
     if args.use_case not in LIBRARY:
         print(f"error: unknown use case '{args.use_case}'. Try --list.", file=sys.stderr)

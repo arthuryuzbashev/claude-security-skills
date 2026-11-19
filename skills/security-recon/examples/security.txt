@@ -1,0 +1,8 @@
+# security.txt for example.test (fake domain)
+Contact: mailto:security@example.test
+Contact: https://example.test/security/report
+Expires: 2027-06-30T23:00:00.000Z
+Encryption: https://example.test/.well-known/pgp-key.txt
+Policy: https://example.test/security/policy
+Preferred-Languages: en
+Canonical: https://example.test/.well-known/security.txt

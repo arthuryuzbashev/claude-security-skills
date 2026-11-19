@@ -40,8 +40,20 @@ Same operation in each language. Field names are examples.
 
 ### EQL
 - `==` is case-sensitive; `:` and `in~` are not
-- `sequence ... with runs=N` repeats one step N times in a row (N up to 100)
+- `sequence ... with runs=N` repeats one step N times in a row (N from 1 to 100; `query_translate.py` refuses higher thresholds and points to ES|QL)
+- `regex` and `regex~` use Lucene regular expressions like ES|QL `RLIKE`: anchored to the whole value, no `\d`, `\s` or lookarounds
 - Every query starts with an event category (`process`, `network`, `file`, `registry`, `authentication`, `iam`, `any`) mapped to `event.category`
+
+## Cloud and identity tables
+
+| Source | Splunk | Sentinel KQL | Elastic |
+|---|---|---|---|
+| AWS CloudTrail | `sourcetype=aws:cloudtrail`, raw JSON paths (`userIdentity.type`) | `AWSCloudTrail` (`EventName`, `UserIdentityType`, `SourceIpAddress`, `ErrorCode`) | `logs-aws.cloudtrail-*` (`event.action`, `event.provider`, `aws.cloudtrail.*`) |
+| Entra ID sign-ins | `sourcetype=azure:monitor:aad` (`properties.*`) | `SigninLogs` (`ResultType` is a string, `UserPrincipalName`, `IPAddress`) | `logs-azure.signinlogs-*` (`azure.signinlogs.properties.*`) |
+| Entra ID audit | `sourcetype=azure:monitor:aad` | `AuditLogs` (`OperationName`, `InitiatedBy`, `TargetResources`) | `logs-azure.auditlogs-*` (`azure.auditlogs.*`) |
+| Defender for Endpoint | add-on specific | `DeviceProcessEvents`, `DeviceEvents` (filter on `ActionType`), `Timestamp` column | - |
+
+KQL: `ResultType` in `SigninLogs` is a string, so compare with `"50126"`, not `50126`. JSON columns (`ResponseElements`, `RequestParameters`, `AdditionalFields`) need `parse_json()` before you read a key.
 
 ## Turning a hunt into a detection
 

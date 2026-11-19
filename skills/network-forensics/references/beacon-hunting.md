@@ -28,7 +28,15 @@ Score 80+ high, 65+ medium, 50+ low. These thresholds are starting points; tune 
 - `--min-conns`: raise it (20+) on noisy networks, lower it (4) when hunting slow beacons over a long window
 - `--allow`: add resolvers, NTP servers, update and telemetry endpoints, monitoring collectors once you have confirmed them. Keep the allow-list in the case notes so others can review it
 - Window: one hour catches fast beacons; slow ones (hourly or daily) need days of logs
-- Aggregate by destination domain (from DNS or SNI) instead of IP when the C2 rotates through CDN or cloud addresses; rename the column to `dst` in a CSV export to do that
+- Aggregate by destination domain instead of IP when the C2 rotates through CDN or cloud addresses: `--by-name` on Zeek `dns.log`/`ssl.log`/`http.log` or Suricata dns/tls events
+
+## Long connections (BCN-002)
+
+Interval scoring needs repeated connections. Interactive C2, reverse shells, SSH or WebSocket tunnels instead hold one session for hours, which gives one record with a big duration. `beacon_detect.py` lists every (source, destination, port) with a connection of at least `--long-conn` seconds (default 1 hour; medium at 8 hours). Expected sources: VPN clients, SSH admin sessions, streaming, chat and push WebSockets, database pools. Zeek writes such a connection only when it closes, so a session still open at the end of the capture is missing from `conn.log` unless the long-connections package is loaded
+
+## Inputs from Suricata
+
+`eve.json` has several events per connection (alert, dns, tls, flow). When flow events are present the script counts only those and reports how many others it skipped, so the counts match connections. `flow.start` is used as the time and `flow.bytes_toserver` as the size
 
 ## Common false positives
 
@@ -55,6 +63,8 @@ The fleet test helps most: if 500 hosts all beacon to the same place, it is prob
 
 ## ATT&CK techniques for network findings
 
+Checked against ATT&CK v20.1 (October 2026).
+
 | Finding | Technique |
 |---|---|
 | C2 over HTTP/HTTPS | T1071.001 Application Layer Protocol: Web Protocols |
@@ -66,6 +76,7 @@ The fleet test helps most: if 500 hosts all beacon to the same place, it is prob
 | Exfiltration over the C2 channel | T1041 Exfiltration Over C2 Channel |
 | Data sent on a schedule | T1029 Scheduled Transfer |
 | Tor or chained proxies | T1090.003 Proxy: Multi-hop Proxy |
+| Tunnel inside another protocol (SSH, DNS, DoH), long-lived sessions | T1572 Protocol Tunneling |
 | Payload download (curl, certutil, PowerShell) | T1105 Ingress Tool Transfer |
 | Port scan from an internal host | T1046 Network Service Discovery |
 

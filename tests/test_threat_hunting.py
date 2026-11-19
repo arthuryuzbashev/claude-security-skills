@@ -123,7 +123,30 @@ class TestAttackTable(unittest.TestCase):
             for tac in tactics:
                 self.assertIn(tac, known)
                 used.add(tac)
-        self.assertEqual(len(am.TACTICS), 14)
+        self.assertEqual(len(am.TACTICS), 15)
+        self.assertIn(("TA0005", "stealth", "Stealth"), am.TACTICS)
+        self.assertIn(("TA0112", "defense-impairment", "Defense Impairment"), am.TACTICS)
+        self.assertNotIn("defense-evasion", used)
+
+    def test_table_ids_are_live_attack_ids(self):
+        for tid, _, _, _ in am.TECHNIQUES:
+            self.assertIn(tid, am.ATTACK_IDS)
+            self.assertNotIn(tid, am.REVOKED)
+            self.assertNotIn(tid, am.DEPRECATED)
+
+    def test_revoked_map_points_at_live_ids(self):
+        for old, new in am.REVOKED.items():
+            self.assertIn(new, am.ATTACK_IDS, old)
+        self.assertEqual(am.REVOKED["T1070.001"], "T1685.005")
+        self.assertEqual(am.REVOKED["T1562.001"], "T1685")
+        self.assertEqual(am.REVOKED["T1656"], "T1684.001")
+
+    def test_v20_tactics_fixed(self):
+        table = {t[0]: t[2] for t in am.TECHNIQUES}
+        self.assertEqual(table["T1550.002"], ["lateral-movement"])
+        self.assertEqual(table["T1548.002"], ["privilege-escalation"])
+        self.assertIn("stealth", table["T1078"])
+        self.assertIn("defense-impairment", table["T1112"])
 
     def test_spot_check_pairs(self):
         table = {t[0]: t[1] for t in am.TECHNIQUES}
@@ -150,9 +173,70 @@ class TestAttackMapper(unittest.TestCase):
         self.assertTrue(t)
         self.assertIsNone(t[0]["name"])
 
+    def test_explicit_unknown_id_flagged_invalid(self):
+        t = [x for x in am.map_text("ticket mentions T1999")["techniques"] if x["id"] == "T1999"][0]
+        self.assertIs(t["valid"], False)
+        self.assertIn("not an ATT&CK", t["note"])
+
+    def test_revoked_id_remapped(self):
+        r = am.map_text("old rule tagged T1070.001\nanother tagged T1562.001")
+        by_id = {t["id"]: t for t in r["techniques"]}
+        self.assertNotIn("T1070.001", by_id)
+        self.assertEqual(by_id["T1685.005"]["revoked_id"], "T1070.001")
+        self.assertEqual(by_id["T1685"]["tactics"], ["defense-impairment"])
+        self.assertIn("revoked", by_id["T1685"]["note"])
+
+    def test_current_id_has_no_revoked_note(self):
+        t = am.map_text("rule tagged T1685.005")["techniques"][0]
+        self.assertEqual(t["id"], "T1685.005")
+        self.assertNotIn("revoked_id", t)
+
+    def test_valid_id_outside_table(self):
+        self.assertNotIn("T1110.002", am.BY_ID)
+        t = am.map_text("analyst wrote T1110.002")["techniques"][0]
+        self.assertIsNone(t["name"])
+        self.assertIs(t["valid"], True)
+        layer = am.navigator_layer(am.map_text("analyst wrote T1110.002 and T1999"))
+        self.assertEqual([x["techniqueID"] for x in layer["techniques"]], ["T1110.002"])
+
+    def test_deprecated_id_flagged(self):
+        t = am.map_text("old note: T1053.004")["techniques"][0]
+        self.assertIs(t["valid"], False)
+        self.assertIn("deprecated", t["note"])
+
+    def test_identity_and_cloud_keywords(self):
+        cases = {
+            "User got 30 push notifications, classic MFA fatigue": "T1621",
+            "Illicit consent grant to a PDF app asking Mail.ReadWrite": "T1528",
+            "Refresh token replay from a new ASN": "T1550.001",
+            "CloudTrail StopLogging called by ci-deploy": "T1685.002",
+            "CreateAccessKey for admin-backup": "T1098.001",
+            "Root account console login from a new IP": "T1078.004",
+            "Set-Mailbox -ForwardingSmtpAddress to an outside address": "T1114.003",
+            "curl to 169.254.169.254 from the web pod": "T1552.005",
+            "unset HISTFILE before running commands": "T1690",
+            "Golden SAML token forged with the stolen signing cert": "T1606.002",
+            "Indirect prompt injection hidden in a shared document": "T1698",
+        }
+        for line, tid in cases.items():
+            ids = [t["id"] for t in am.map_text(line)["techniques"]]
+            self.assertIn(tid, ids, line)
+
+    def test_identity_keywords_negative(self):
+        for line in ("User approved one MFA prompt at login", "Weekly access review of app registrations",
+                     "Shell history file rotated by logrotate", "Token bucket rate limiter tuned"):
+            ids = [t["id"] for t in am.map_text(line)["techniques"]]
+            for tid in ("T1621", "T1528", "T1550.001", "T1690", "T1098.001"):
+                self.assertNotIn(tid, ids, line)
+
+    def test_token_impersonation_stays_t1134(self):
+        ids = [t["id"] for t in am.map_text("token impersonation with steal_token")["techniques"]]
+        self.assertIn("T1134", ids)
+        self.assertNotIn("T1528", ids)
+
     def test_coverage_shape(self):
         cov = am.map_text("procdump lsass")["coverage"]
-        self.assertEqual(len(cov), 14)
+        self.assertEqual(len(cov), 15)
         for c in cov:
             self.assertEqual(set(c), {"tactic", "tactic_id", "shortname", "matched", "in_table", "techniques"})
 
@@ -162,8 +246,10 @@ class TestAttackMapper(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(set(data), {"lines", "techniques", "coverage"})
         ids = [t["id"] for t in data["techniques"]]
-        for tid in ("T1566.001", "T1003.001", "T1490", "T1547.001"):
+        for tid in ("T1566.001", "T1003.001", "T1490", "T1547.001", "T1685", "T1685.005"):
             self.assertIn(tid, ids)
+        self.assertNotIn("T1562.001", ids)
+        self.assertNotIn("T1070.001", ids)
         unmatched = [l["text"] for l in data["lines"] if not l["techniques"]]
         self.assertEqual(unmatched, ["Printer queue jammed on floor 3"])
 
@@ -176,6 +262,7 @@ class TestAttackMapper(unittest.TestCase):
                 layer = json.load(fh)
         self.assertEqual(layer["domain"], "enterprise-attack")
         self.assertEqual(layer["versions"]["layer"], "4.5")
+        self.assertEqual(layer["versions"]["attack"], "20")
         self.assertEqual(layer["name"], "t")
         self.assertTrue(all(t["score"] >= 1 for t in layer["techniques"]))
 

@@ -5,6 +5,9 @@ PermitRootLogin yes
 #PasswordAuthentication no
 X11Forwarding yes
 MaxAuthTries 10
+PermitUserEnvironment yes
+IgnoreRhosts no
+HostKeyAlgorithms +ssh-rsa
 Ciphers aes128-ctr,aes256-ctr,aes128-cbc,3des-cbc
 MACs hmac-sha2-256,hmac-md5
 KexAlgorithms curve25519-sha256,diffie-hellman-group1-sha1

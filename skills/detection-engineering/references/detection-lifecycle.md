@@ -42,11 +42,17 @@ Keep the events next to the rule (`rule.yml` + `rule.tests.jsonl`) and run them 
 - Exclusions for a host or user group need an owner and an expiry date
 - Track alert volume and true positive rate per rule; a rule nobody reads is worse than no rule
 
+## Keeping rules current
+
+Re-lint the whole rule set after each ATT&CK release (April and October). v19 revoked most of T1562 and T1070.001/.002 and split defense evasion into stealth and defense impairment; `sigma_lint.py` flags those tags (SIG-033, SIG-034) and names the replacement.
+
 ## Review checklist
 
 - [ ] Title says what is detected; description says why it matters
 - [ ] UUID id, valid status and level, date in `YYYY-MM-DD`
-- [ ] ATT&CK tags are real and lowercase (tactic plus technique)
+- [ ] ATT&CK tags are live in the current version and lowercase (tactic plus technique); no `defense-evasion` or revoked IDs after the v19 split
+- [ ] Thresholds and sequences live in a correlation rule with a `timespan` and `group-by`, not a pipe aggregation
+- [ ] Environment-specific exclusions live in a filter rule when the base rule is shared
 - [ ] logsource matches where the fields come from
 - [ ] Every selection is used; condition reads correctly out loud
 - [ ] Filters are narrow and explained in `falsepositives`

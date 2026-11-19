@@ -22,6 +22,7 @@
       "aliases": ["CVE-2099-0003"],
       "summary": "Header injection in the development server (fake advisory)",
       "database_specific": {"severity": "MODERATE"},
+      "severity": [{"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:L/VA:N/SC:L/SI:L/SA:N"}],
       "affected": [{"package": {"ecosystem": "PyPI", "name": "flask"},
                     "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "2.0.0"}, {"fixed": "2.2.5"}]}]}]
     },

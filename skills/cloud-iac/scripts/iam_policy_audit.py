@@ -58,6 +58,13 @@ ESCALATION_PATHS: List[Tuple[str, List[str], str]] = [
     ("UpdateDevEndpoint", ["glue:UpdateDevEndpoint"], "add an SSH key to an existing privileged Glue dev endpoint"),
     ("PassRole + CloudFormation", ["iam:PassRole", "cloudformation:CreateStack"], "create a stack that runs as a privileged role and creates anything"),
     ("PassRole + Data Pipeline", ["iam:PassRole", "datapipeline:CreatePipeline", "datapipeline:PutPipelineDefinition"], "run commands through a pipeline with a privileged role"),
+    ("PassRole + ECS task", ["iam:PassRole", "ecs:RegisterTaskDefinition", "ecs:RunTask"], "run a container whose task role is privileged and read its credentials"),
+    ("PassRole + CodeBuild", ["iam:PassRole", "codebuild:CreateProject", "codebuild:StartBuild"], "run a build with a privileged service role and print its credentials"),
+    ("PassRole + SageMaker notebook", ["iam:PassRole", "sagemaker:CreateNotebookInstance", "sagemaker:CreatePresignedNotebookInstanceUrl"], "open a notebook running as a privileged role"),
+    ("SSM SendCommand", ["ssm:SendCommand"], "run commands on any managed instance and use its instance-profile credentials"),
+    ("SSM StartSession", ["ssm:StartSession"], "open a shell on any managed instance and use its instance-profile credentials"),
+    ("EC2 Instance Connect", ["ec2-instance-connect:SendSSHPublicKey"], "push an SSH key to an instance, log in and use its role"),
+    ("UpdateFunctionConfiguration", ["lambda:UpdateFunctionConfiguration"], "attach a layer or change the handler of a function that already runs as a privileged role"),
 ]
 
 

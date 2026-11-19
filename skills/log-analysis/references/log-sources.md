@@ -76,6 +76,54 @@ Status codes during triage:
 
 Many `0xC0000064` from one source = guessing usernames. Many `0xC000006A` across many users = spraying a real user list.
 
+## AWS CloudTrail
+
+Each record is JSON. A trail file in S3 is one object `{"Records": [...]}`; `log_triage.py` reads that on one line, or flatten it first with `jq -c '.Records[]'`.
+
+| Field | Meaning |
+|---|---|
+| `eventTime`, `eventSource`, `eventName` | when, which service (`iam.amazonaws.com`), which API call |
+| `userIdentity.type` | `Root`, `IAMUser`, `AssumedRole`, `FederatedUser`, `AWSService` |
+| `userIdentity.arn`, `userName`, `accessKeyId` | who; `sessionContext.sessionIssuer` names the role behind an assumed role |
+| `sourceIPAddress`, `userAgent` | where from; an AWS service name instead of an IP means the service called on your behalf |
+| `errorCode` | present only on failure (`AccessDenied`, `UnauthorizedOperation`) |
+| `responseElements.ConsoleLogin` | `Success` or `Failure` for `ConsoleLogin` events |
+| `additionalEventData.MFAUsed` | `Yes` or `No` for `ConsoleLogin` events |
+
+| Events | Why they matter |
+|---|---|
+| `ConsoleLogin` by `Root` | root should almost never sign in; alert on every one |
+| `StopLogging`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors` | audit trail turned off or narrowed (T1685.002) |
+| `CreateAccessKey`, `CreateLoginProfile`, `UpdateLoginProfile` | new long-lived credentials (T1098.001), worst when made for another user |
+| `AttachUserPolicy`, `PutUserPolicy`, `AddUserToGroup` | privilege change |
+| `GetCallerIdentity` followed by many `AccessDenied` | a stolen key checking what it can do |
+| `DeleteDetector` (GuardDuty), `DisableSecurityHub` | security tooling turned off |
+
+Failed console logins for user names that do not exist show `HIDDEN_DUE_TO_SECURITY_REASONS` as the user.
+
+## Microsoft Entra ID sign-in logs
+
+Columns as in Sentinel `SigninLogs`; the Graph API `signIns` resource uses camelCase (`userPrincipalName`, `status.errorCode`), the Azure diagnostic export nests them under `properties`.
+
+| `ResultType` | Meaning |
+|---|---|
+| `0` | success |
+| `50126` | invalid username or password |
+| `50053` | account locked (smart lockout) or sign-in from a blocked IP |
+| `50034` | account does not exist in the tenant |
+| `50057` / `50055` | account disabled / password expired |
+| `50074` / `50076` | MFA required; an interrupt, normal before a successful MFA sign-in |
+| `500121` | MFA failed, including the user denying the push or reporting it |
+| `53003` | blocked by Conditional Access |
+
+| Pattern | Meaning |
+|---|---|
+| many `50126` across many users from one IP | password spray (T1110.003) |
+| repeated `500121` for one user, then `0` | MFA fatigue that worked (T1621) |
+| `AuthenticationProtocol == "deviceCode"` for a user who never uses a TV or CLI | device code phishing (T1528) |
+| `AuditLogs` `Consent to application` with mail or file scopes | illicit consent grant (T1528) |
+| `AuditLogs` `Add service principal credentials` / `Update application - Certificates and secrets management` | backdoor credentials on an app (T1098.001) |
+
 ## Triage checklist
 
 - [ ] Copy the logs, record file names, sizes, hashes (`sha256sum`) and the time range covered
@@ -85,5 +133,6 @@ Many `0xC0000064` from one source = guessing usernames. Many `0xC000006A` across
 - [ ] For every suspicious success: what did that session do next (sudo, new users, cron, authorized_keys, outbound connections)?
 - [ ] Web: anything with an attack pattern that answered `200` or `500`
 - [ ] Web: requests to files that should not exist (`.env`, `.git`, backups) answered `200`
+- [ ] Cloud: root or no-MFA console sign-ins, trail changes, new access keys, MFA denials followed by a success
 - [ ] Compare against known-good: your own scanners, monitoring, CI deploy users
 - [ ] Write down what you did not check

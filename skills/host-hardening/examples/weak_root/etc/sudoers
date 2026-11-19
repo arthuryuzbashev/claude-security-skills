@@ -1,0 +1,5 @@
+# Fictional legacy web server sudoers
+Defaults	env_reset
+Defaults	!use_pty
+%sudo	ALL=(ALL:ALL) ALL
+#includedir /etc/sudoers.d

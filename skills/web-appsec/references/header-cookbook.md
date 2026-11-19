@@ -8,7 +8,20 @@ Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'self';
 X-Content-Type-Options: nosniff
 Referrer-Policy: strict-origin-when-cross-origin
 Permissions-Policy: camera=(), microphone=(), geolocation=()
+Cross-Origin-Opener-Policy: same-origin
 ```
+
+Leave out `X-XSS-Protection`, or send `X-XSS-Protection: 0`. The filter it controls is gone from current browsers and caused leaks where it ran. Use `same-origin-allow-popups` for COOP if login or payment runs in a popup.
+
+## Strict CSP with nonces
+
+Host allow-lists are easy to bypass through JSONP endpoints and script gadgets on allowed CDNs. A nonce-based policy holds up better:
+
+```
+Content-Security-Policy: script-src 'nonce-{random per response}' 'strict-dynamic' https: 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'
+```
+
+Current browsers honor only the nonce and `'strict-dynamic'`; `https:` and `'unsafe-inline'` are fallbacks for old browsers and are ignored when a nonce is present. Generate a fresh nonce for every response, never reuse one. `header_audit.py` treats this pattern as strict (no HDR-012/014) and wants `base-uri` next to it (HDR-017).
 
 ## nginx
 
@@ -18,6 +31,7 @@ add_header Content-Security-Policy "default-src 'self'; object-src 'none'; base-
 add_header X-Content-Type-Options "nosniff" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+add_header Cross-Origin-Opener-Policy "same-origin" always;
 server_tokens off;
 ```
 
@@ -68,3 +82,5 @@ Set-Cookie: __Host-session=<value>; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
 
 The `__Host-` prefix makes the browser refuse the cookie unless it is Secure, has `Path=/` and no `Domain`, which blocks subdomain overwrites.
+
+Get the prefix rules exactly right: a `__Host-` cookie with a `Domain` attribute or a path other than `/`, or a `__Secure-` cookie without `Secure`, is dropped by the browser without any error (`header_audit.py` CK-003).

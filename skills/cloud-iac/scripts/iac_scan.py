@@ -374,6 +374,17 @@ def _env_pairs(args: str) -> List[Tuple[str, str]]:
     return [(k, v.strip("'\"")) for k, v in pairs]
 
 
+TLS_OFF_PATTERNS = [
+    ("curl -k", re.compile(r"\bcurl\b[^|;&]*\s(-[A-Za-z]*k[A-Za-z]*|--insecure)(\s|$)")),
+    ("wget --no-check-certificate", re.compile(r"\bwget\b[^|;&]*--no-check-certificate")),
+    ("pip --trusted-host", re.compile(r"\bpip3?\b[^|;&]*--trusted-host")),
+    ("npm strict-ssl false", re.compile(r"\b(npm|yarn)\b[^|;&]*strict-ssl[\s=]+false", re.I)),
+    ("git sslVerify false", re.compile(r"http\.sslverify[\s=]+(false|0)", re.I)),
+    ("GIT_SSL_NO_VERIFY", re.compile(r"\bGIT_SSL_NO_VERIFY[\s=]+(1|true)", re.I)),
+    ("NODE_TLS_REJECT_UNAUTHORIZED=0", re.compile(r"\bNODE_TLS_REJECT_UNAUTHORIZED[\s=]+[\"']?0")),
+]
+
+
 def scan_dockerfile(text: str, path: str = "Dockerfile") -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     instructions = _docker_instructions(text)
@@ -412,6 +423,12 @@ def scan_dockerfile(text: str, path: str = "Dockerfile") -> List[Dict[str, str]]
             out.append(finding("IAC-005", "medium", "Remote script piped to a shell",
                                "curl | sh runs whatever the server returns at build time, with no integrity check.",
                                "Download, verify a pinned checksum or signature, then run.", loc))
+        if inst in ("RUN", "ENV", "ARG"):
+            hit = next((label for label, rx in TLS_OFF_PATTERNS if rx.search(args)), None)
+            if hit:
+                out.append(finding("IAC-006", "medium", f"TLS verification turned off in the build ({hit})",
+                                   "Downloads in this step accept any certificate, so anyone on the network path can swap the package or script.",
+                                   "Remove the flag and fix the trust store instead (COPY your CA into the image and run update-ca-certificates).", loc))
     if last_from_line:
         if user_in_stage is None or user_in_stage.split(":")[0] in ("root", "0"):
             what = "no USER instruction" if user_in_stage is None else f"USER {user_in_stage}"
@@ -623,6 +640,8 @@ def scan_terraform_files(files: List[Tuple[str, str]]) -> List[Dict[str, str]]:
         return [b for _, b in resources if b.kind == "resource" and b.labels[0] == rtype
                 and re.search(rf"aws_s3_bucket\.{re.escape(bucket)}\b", b.attr("bucket") or "")]
 
+    ebs_default = any(b.kind == "resource" and b.labels[0] == "aws_ebs_encryption_by_default"
+                      and _s(b.attr("enabled")).lower() != "false" for _, b in resources)
     out: List[Dict[str, str]] = []
     for path, b in resources:
         rtype = b.labels[0] if b.labels else b.kind
@@ -713,6 +732,140 @@ def scan_terraform_files(files: List[Tuple[str, str]]) -> List[Dict[str, str]]:
                 out.append(finding("IAC-131", "medium", f"{rname}: storage not encrypted",
                                    "storage_encrypted is not true. Encryption can only be turned on at creation (or via snapshot copy and restore).",
                                    "Set storage_encrypted = true (and kms_key_id for a customer-managed key).", loc))
+        if b.kind == "resource":
+            out += _tf_compute_findings(b, rtype, rname, loc, aloc, ebs_default)
+            out += _tf_logging_findings(b, rtype, rname, loc, aloc)
+            out += _tf_other_cloud_findings(b, rtype, rname, path, loc, aloc)
+    return out
+
+
+def _tf_compute_findings(b: Block, rtype: str, rname: str, loc: str, aloc, ebs_default: bool) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    if rtype in ("aws_instance", "aws_launch_template", "aws_launch_configuration"):
+        meta = b.sub("metadata_options")
+        tokens = _s(meta[0].attr("http_tokens")).lower() if meta else ""
+        endpoint = _s(meta[0].attr("http_endpoint")).lower() if meta else ""
+        if tokens != "required" and endpoint != "disabled":
+            out.append(finding("IAC-150", "medium", f"{rname}: IMDSv1 still allowed",
+                               "Without http_tokens = \"required\" the instance metadata service answers plain GET requests, so one SSRF bug in the app can read the instance role's credentials.",
+                               "Add metadata_options { http_tokens = \"required\"  http_put_response_hop_limit = 1 } (2 for containers on the host).",
+                               f"{loc.rsplit(':', 1)[0]}:{meta[0].line}" if meta else loc))
+    if not ebs_default:
+        if rtype == "aws_ebs_volume" and _s(b.attr("encrypted")).lower() != "true":
+            out.append(finding("IAC-151", "low", f"{rname}: EBS volume not encrypted",
+                               "encrypted is not true and no aws_ebs_encryption_by_default resource was found in the scanned files.",
+                               "Set encrypted = true (kms_key_id for your own key), or turn on aws_ebs_encryption_by_default for the account and region.", loc))
+        if rtype in ("aws_instance", "aws_launch_template"):
+            for dev in b.sub("root_block_device") + b.sub("ebs_block_device") + \
+                    [e for bd in b.sub("block_device_mappings") for e in bd.sub("ebs")]:
+                if _s(dev.attr("encrypted")).lower() != "true" and not dev.attr("snapshot_id"):
+                    out.append(finding("IAC-151", "low", f"{rname}: {dev.kind} not encrypted",
+                                       "encrypted is not true and no aws_ebs_encryption_by_default resource was found in the scanned files.",
+                                       "Set encrypted = true on the block device, or turn on EBS encryption by default for the account.",
+                                       f"{loc.rsplit(':', 1)[0]}:{dev.line}"))
+    if rtype == "aws_eks_cluster":
+        for vpc in b.sub("vpc_config"):
+            public = _s(vpc.attr("endpoint_public_access")).lower() != "false"
+            cidrs = vpc.attr("public_access_cidrs")
+            if public and (cidrs is None or _open_world(cidrs) or '"0.0.0.0/0"' in cidrs):
+                out.append(finding("IAC-152", "medium", f"{rname}: EKS API endpoint open to the internet",
+                                   "endpoint_public_access defaults to true and public_access_cidrs to 0.0.0.0/0, so the Kubernetes API answers anyone; a leaked kubeconfig or an API bug is reachable from everywhere.",
+                                   "Set endpoint_private_access = true and endpoint_public_access = false, or limit public_access_cidrs to your office or VPN ranges.",
+                                   f"{loc.rsplit(':', 1)[0]}:{vpc.line}"))
+    if rtype == "aws_lambda_function_url" and _s(b.attr("authorization_type")).upper() == "NONE":
+        out.append(finding("IAC-153", "medium", f"{rname}: Lambda function URL without auth",
+                           "authorization_type = \"NONE\" makes the function callable by anyone with the URL. Fine for a public webhook that checks its own signature, risky for anything else.",
+                           "Use authorization_type = \"AWS_IAM\", or verify a signature or token inside the function and document why it is public.", aloc("authorization_type")))
+    return out
+
+
+def _tf_logging_findings(b: Block, rtype: str, rname: str, loc: str, aloc) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    if rtype == "aws_kms_key":
+        spec = _s(b.attr("customer_master_key_spec")) or "SYMMETRIC_DEFAULT"
+        if spec == "SYMMETRIC_DEFAULT" and _s(b.attr("enable_key_rotation")).lower() != "true":
+            out.append(finding("IAC-160", "low", f"{rname}: KMS key rotation off",
+                               "enable_key_rotation defaults to false, so the key material never changes (CIS AWS Foundations asks for rotation on symmetric customer keys).",
+                               "Set enable_key_rotation = true (rotation_period_in_days if you need a period other than 365).", loc))
+    if rtype == "aws_cloudtrail":
+        gaps = []
+        if _s(b.attr("enable_log_file_validation")).lower() != "true":
+            gaps.append("log file validation off")
+        if _s(b.attr("is_multi_region_trail")).lower() != "true":
+            gaps.append("single region")
+        if _s(b.attr("enable_logging")).lower() == "false":
+            gaps.append("logging disabled")
+        if gaps:
+            out.append(finding("IAC-161", "medium" if "logging disabled" in gaps else "low", f"{rname}: CloudTrail gaps ({', '.join(gaps)})",
+                               "Without validation, edited or deleted log files go unnoticed; a single-region trail misses activity in other regions.",
+                               "Set enable_log_file_validation = true and is_multi_region_trail = true, and send logs to a bucket in a separate account.", loc))
+    return out
+
+
+INTERNET_PREFIXES = {"*", "internet", "any", "0.0.0.0/0", "0.0.0.0", "::/0"}
+
+
+def _port_ranges(values: List[str]) -> List[Tuple[Optional[int], Optional[int]]]:
+    out: List[Tuple[Optional[int], Optional[int]]] = []
+    for v in values:
+        v = v.strip()
+        if v in ("*", ""):
+            out.append((0, 65535))
+            continue
+        lo, _, hi = v.partition("-")
+        if lo.isdigit():
+            out.append((int(lo), int(hi) if hi.isdigit() else int(lo)))
+    return out
+
+
+def _tf_other_cloud_findings(b: Block, rtype: str, rname: str, path: str, loc: str, aloc) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    if rtype.startswith("google_"):
+        for attr in ("member", "members"):
+            v = b.attr(attr) or ""
+            who = [p for p in ("allUsers", "allAuthenticatedUsers") if f'"{p}"' in v]
+            if who:
+                out.append(finding("IAC-170", "high", f"{rname}: IAM grant to {', '.join(who)}",
+                                   "allUsers is anyone on the internet; allAuthenticatedUsers is anyone with any Google account, which is no real restriction.",
+                                   "Grant the role to specific users, groups or service accounts. For public static assets, put a load balancer or CDN in front instead.", aloc(attr)))
+    if rtype == "google_compute_firewall" and _s(b.attr("direction")).upper() in ("", "INGRESS"):
+        if _open_world(b.attr("source_ranges")):
+            for allow in b.sub("allow"):
+                proto = _s(allow.attr("protocol")).lower()
+                ports = re.findall(r'"([^"]*)"', allow.attr("ports") or "")
+                ranges = _port_ranges(ports) if ports else [(0, 65535)]
+                for lo, hi in ranges:
+                    out += _ingress_findings("-1" if proto == "all" else proto, lo, hi, f"{path}:{allow.line}", rname)
+    rules: List[Block] = []
+    if rtype == "azurerm_network_security_rule":
+        rules = [b]
+    elif rtype == "azurerm_network_security_group":
+        rules = b.sub("security_rule")
+    for r in rules:
+        if _s(r.attr("direction")).lower() != "inbound" or _s(r.attr("access")).lower() != "allow":
+            continue
+        sources = [_s(r.attr("source_address_prefix")).lower()] + \
+            [x.lower() for x in re.findall(r'"([^"]*)"', r.attr("source_address_prefixes") or "")]
+        if not any(s in INTERNET_PREFIXES for s in sources):
+            continue
+        ports = [_s(r.attr("destination_port_range"))] if r.attr("destination_port_range") else []
+        ports += re.findall(r'"([^"]*)"', r.attr("destination_port_ranges") or "")
+        proto = _s(r.attr("protocol")).lower()
+        for lo, hi in _port_ranges(ports):
+            out += _ingress_findings("-1" if proto == "*" and (lo, hi) == (0, 65535) else proto, lo, hi,
+                                     f"{path}:{r.line}", rname)
+    if rtype == "azurerm_storage_account":
+        gaps = []
+        if _s(b.attr("allow_nested_items_to_be_public")).lower() == "true" or _s(b.attr("allow_blob_public_access")).lower() == "true":
+            gaps.append("blob containers may be public")
+        if _s(b.attr("min_tls_version")).upper() in ("TLS1_0", "TLS1_1"):
+            gaps.append(f"min_tls_version {_s(b.attr('min_tls_version'))}")
+        if _s(b.attr("https_traffic_only_enabled")).lower() == "false" or _s(b.attr("enable_https_traffic_only")).lower() == "false":
+            gaps.append("plain HTTP allowed")
+        if gaps:
+            out.append(finding("IAC-171", "medium", f"{rname}: storage account weakened ({', '.join(gaps)})",
+                               "Each of these widens who can read the data or how it travels.",
+                               "Set allow_nested_items_to_be_public = false, min_tls_version = \"TLS1_2\" and keep HTTPS-only traffic on.", loc))
     return out
 
 
@@ -738,11 +891,100 @@ def _image_unpinned(image: str) -> bool:
     return not tag or tag == "latest"
 
 
+def _profile_type(sc: Dict[str, Any], key: str) -> str:
+    prof = sc.get(key) if isinstance(sc.get(key), dict) else {}
+    return str(prof.get("type", "")).strip()
+
+
+def _k8s_restricted_findings(c: Dict[str, Any], sc: Dict[str, Any], pod_sc: Dict[str, Any], cname: str, path: str) -> List[Dict[str, str]]:
+    """Pod Security Standards: Unconfined profiles (baseline) and restricted-profile gaps."""
+    out: List[Dict[str, str]] = []
+    cline = f"{path}:{getattr(c, 'line', 0)}"
+    seccomp = _profile_type(sc, "seccompProfile") or _profile_type(pod_sc, "seccompProfile")
+    apparmor = _profile_type(sc, "appArmorProfile") or _profile_type(pod_sc, "appArmorProfile")
+    unconfined = [n for n, v in (("seccompProfile", seccomp), ("appArmorProfile", apparmor)) if v == "Unconfined"]
+    if unconfined:
+        out.append(finding("IAC-211", "medium", f"{cname}: {' and '.join(unconfined)} set to Unconfined",
+                           "Unconfined turns off the syscall or LSM filter the runtime applies by default, so kernel bugs are easier to reach from the container. The Pod Security baseline profile forbids it.",
+                           "Use type: RuntimeDefault (or Localhost with a reviewed profile).", cline))
+    if ytrue(sc.get("privileged")):
+        return out
+    gaps = []
+    if seccomp not in ("RuntimeDefault", "Localhost") and not unconfined:
+        gaps.append("seccompProfile RuntimeDefault")
+    caps = sc.get("capabilities") if isinstance(sc.get("capabilities"), dict) else {}
+    if "ALL" not in {str(x).upper() for x in (caps.get("drop") or [])}:
+        gaps.append("capabilities.drop [ALL]")
+    if not ytrue(sc.get("readOnlyRootFilesystem")):
+        gaps.append("readOnlyRootFilesystem true")
+    if gaps:
+        out.append(finding("IAC-212", "low", f"{cname}: below the restricted profile (missing {', '.join(gaps)})",
+                           "The Pod Security restricted profile is the target for app workloads. Each missing item removes a layer that makes a code execution bug harder to turn into node access or persistence.",
+                           "Add to the container securityContext: seccompProfile {type: RuntimeDefault}, capabilities {drop: [ALL]}, readOnlyRootFilesystem: true (emptyDir for scratch paths).",
+                           cline))
+    for port in c.get("ports") or []:
+        if isinstance(port, dict) and (_int(port.get("hostPort")) or 0) > 0:
+            out.append(finding("IAC-213", "low", f"{cname}: hostPort {port.get('hostPort')}",
+                               "hostPort binds the port on the node's own IP, bypassing Service and NetworkPolicy design and pinning the pod to nodes where the port is free.",
+                               "Expose the port through a Service (ClusterIP, NodePort or LoadBalancer) instead.", f"{path}:{line_of(port, 'hostPort')}"))
+    return out
+
+
+RBAC_DANGEROUS = [
+    ({"escalate", "bind", "impersonate"}, None, "can grant itself or act as any identity (escalate, bind, impersonate)"),
+    ({"create", "*"}, {"pods/exec", "pods/attach"}, "can run commands inside other pods and take their service account"),
+    ({"get", "create", "*"}, {"nodes/proxy"}, "can reach the kubelet API on every node"),
+    ({"create", "*"}, {"serviceaccounts/token"}, "can mint tokens for other service accounts"),
+    ({"get", "list", "watch", "*"}, {"secrets"}, "can read Secrets, which usually hold credentials and service account tokens"),
+]
+BROAD_GROUPS = {"system:anonymous": "critical", "system:unauthenticated": "critical", "system:authenticated": "high"}
+
+
+def scan_rbac_doc(doc: Dict[str, Any], path: str, obj: str) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    kind = str(doc.get("kind", ""))
+    if kind in ("Role", "ClusterRole"):
+        for rule in doc.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            verbs = {str(v).lower() for v in (rule.get("verbs") or [])}
+            res = {str(r).lower() for r in (rule.get("resources") or [])}
+            where = f"{path}:{getattr(rule, 'line', 0)}"
+            if "*" in verbs or "*" in res:
+                full = "*" in verbs and "*" in res
+                out.append(finding("IAC-220", "critical" if full and kind == "ClusterRole" else "high",
+                                   f"{obj}: wildcard {'verbs and resources' if full else 'verbs' if '*' in verbs else 'resources'}",
+                                   "A * in RBAC also matches subresources and any resource type added later, so the role grows silently." +
+                                   (" verbs * on resources * is cluster-admin." if full and kind == "ClusterRole" else ""),
+                                   "List the exact resources and verbs the workload calls (kubectl auth can-i --list helps).", where))
+                continue
+            for need_verbs, need_res, what in RBAC_DANGEROUS:
+                if verbs & need_verbs and (need_res is None or res & need_res):
+                    sev = "medium" if need_res == {"secrets"} and kind == "Role" else "high"
+                    out.append(finding("IAC-221", sev, f"{obj}: privilege-escalating RBAC rule",
+                                       f"verbs {sorted(verbs)} on {sorted(res) or ['*']}: the subject {what}.",
+                                       "Drop the rule, or scope it with resourceNames and give it only to a break-glass admin role.", where))
+                    break
+    if kind in ("RoleBinding", "ClusterRoleBinding"):
+        for subj in doc.get("subjects") or []:
+            if not isinstance(subj, dict):
+                continue
+            name = str(subj.get("name", ""))
+            if name in BROAD_GROUPS:
+                role = (doc.get("roleRef") or {}).get("name", "?") if isinstance(doc.get("roleRef"), dict) else "?"
+                out.append(finding("IAC-222", BROAD_GROUPS[name], f"{obj}: {role} bound to {name}",
+                                   f"{name} covers " + ("every request without credentials." if name != "system:authenticated"
+                                                        else "every identity that can log in, including every service account and, on GKE, anyone with a Google account."),
+                                   "Bind the role to specific users, groups or service accounts.", f"{path}:{getattr(subj, 'line', 0)}"))
+    return out
+
+
 def scan_k8s_doc(doc: Any, path: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     if not isinstance(doc, dict):
         return out
     obj = f"{doc.get('kind', 'object')}/{(doc.get('metadata') or {}).get('name', '?') if isinstance(doc.get('metadata'), dict) else '?'}"
+    out += scan_rbac_doc(doc, path, obj)
     for spec in _walk(doc):
         if not isinstance(spec.get("containers"), list):
             continue
@@ -808,6 +1050,7 @@ def scan_k8s_doc(doc: Any, path: str) -> List[Dict[str, str]]:
                 out.append(finding("IAC-205", "low", f"{cname}: no {' / '.join(missing)} limit",
                                    "Without limits one pod can starve the node (noisy neighbour or a cheap DoS).",
                                    "Set resources.limits.memory (and cpu, or rely on requests plus a LimitRange).", f"{path}:{getattr(c, 'line', 0)}"))
+            out += _k8s_restricted_findings(c, sc, pod_sc, cname, path)
             image = str(c.get("image", ""))
             if image and _image_unpinned(image):
                 out.append(finding("IAC-207", "medium", f"{cname}: image {image} not pinned",
@@ -868,6 +1111,20 @@ def scan_compose_doc(doc: Any, path: str) -> List[Dict[str, str]]:
                 out.append(finding("IAC-304", "high", f"{label}: secret in environment ({k})",
                                    f"{k}={mask(v)} is committed in the compose file.",
                                    "Use an untracked .env file with ${VAR} references, or compose secrets:.", f"{path}:{ln}"))
+        for port in svc.get("ports") or []:
+            spec = str(port.get("published", "")) + ":" + str(port.get("target", "")) if isinstance(port, dict) else str(port)
+            if isinstance(port, dict) and port.get("host_ip"):
+                spec = str(port.get("host_ip")) + ":" + spec
+            parts = spec.split("/")[0].split(":")
+            if len(parts) < 2:
+                continue  # container-only port, not published
+            host_ip = parts[0] if len(parts) >= 3 else ""
+            target = _int(parts[-1])
+            if host_ip in ("", "0.0.0.0", "::", "[::]") and target in DATA_PORTS:
+                out.append(finding("IAC-307", "medium", f"{label}: {DATA_PORTS[target]} port published on all interfaces",
+                                   f"\"{spec}\" binds every host interface, and Docker's iptables rules bypass host firewalls such as ufw, so the data store is reachable from the network.",
+                                   f"Drop the ports entry (services reach it on the compose network) or bind it locally: \"127.0.0.1:{parts[-2]}:{parts[-1]}\".",
+                                   f"{path}:{getattr(port, 'line', 0) or line_of(svc, 'ports')}"))
         image = str(svc.get("image", ""))
         if image and _image_unpinned(image):
             out.append(finding("IAC-306", "low", f"{label}: image {image} not pinned",

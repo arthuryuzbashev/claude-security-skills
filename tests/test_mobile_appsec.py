@@ -17,8 +17,9 @@ def ids(findings):
     return {f["id"] for f in findings}
 
 
-def manifest(app_attrs="", body="", sdk='<uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34"/>', extra=""):
-    xml = (f'<manifest {NS} package="test.example.app">{sdk}{extra}'
+def manifest(app_attrs="", body="", sdk='<uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36"/>', extra="",
+             root_attrs=""):
+    xml = (f'<manifest {NS} package="test.example.app" {root_attrs}>{sdk}{extra}'
            f'<application android:allowBackup="false" {app_attrs}>{body}</application></manifest>')
     return ET.fromstring(xml)
 
@@ -66,6 +67,36 @@ class AndroidAppFlagTests(unittest.TestCase):
     def test_unknown_target_sdk(self):
         self.assertIn("AND-050", ids(run_android(sdk="")))
         self.assertNotIn("AND-050", ids(run_android(sdk="", target_sdk=34)))
+        self.assertNotIn("AND-051", ids(run_android(sdk="")))
+
+    def test_play_target_sdk(self):
+        def sev(target):
+            sdk = f'<uses-sdk android:minSdkVersion="30" android:targetSdkVersion="{target}"/>'
+            return {f["id"]: f["severity"] for f in run_android(sdk=sdk)}.get("AND-051")
+        self.assertEqual(sev(34), "medium")
+        self.assertEqual(sev(35), "low")
+        self.assertIsNone(sev(36))
+        self.assertIsNone(sev(37))
+        # Wear OS / Automotive rule: 35 is enough
+        sdk = '<uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35"/>'
+        res = andr.audit_manifest(manifest(sdk=sdk), required_target=35)
+        self.assertNotIn("AND-051", ids(res["findings"]))
+        # --target-sdk from Gradle feeds the same check
+        self.assertIn("AND-051", ids(run_android(sdk="", target_sdk=34)))
+
+    def test_task_reparenting(self):
+        found = run_android(app_attrs='android:allowTaskReparenting="true"')
+        self.assertEqual([(f["id"], f["severity"]) for f in found], [("AND-052", "medium")])
+        body = '<activity android:name=".Login" android:allowTaskReparenting="true"/>'
+        found = run_android(body=body, sdk='<uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36"/>')
+        self.assertEqual([(f["id"], f["severity"], f["location"]) for f in found], [("AND-052", "low", ".Login")])
+        self.assertEqual(run_android(app_attrs='android:allowTaskReparenting="false"'), [])
+
+    def test_shared_user_id(self):
+        found = run_android(root_attrs='android:sharedUserId="test.example.shared"')
+        self.assertEqual(ids(found), {"AND-053"})
+        migrated = 'android:sharedUserId="test.example.shared" android:sharedUserMaxSdkVersion="32"'
+        self.assertEqual(run_android(root_attrs=migrated), [])
 
 
 class AndroidNscTests(unittest.TestCase):
@@ -125,7 +156,7 @@ class AndroidComponentTests(unittest.TestCase):
         found = run_android(body=body, sdk=sdk30)
         self.assertIn("AND-022", ids(found))
         self.assertIn("by default", [f for f in found if f["id"] == "AND-022"][0]["title"])
-        found = run_android(body=body)  # targetSdk 34
+        found = run_android(body=body)  # targetSdk 36
         self.assertEqual(ids(found), {"AND-024"})
 
     def test_provider_default_export_by_sdk(self):
@@ -186,7 +217,8 @@ class AndroidCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         data = json.loads(out)
         self.assertEqual(set(data), {"manifest", "package", "target_sdk", "min_sdk", "network_security_config", "findings"})
-        self.assertTrue({"AND-001", "AND-012", "AND-014", "AND-020", "AND-040"} <= ids(data["findings"]))
+        self.assertTrue({"AND-001", "AND-012", "AND-014", "AND-020", "AND-040", "AND-051", "AND-052", "AND-053"}
+                        <= ids(data["findings"]))
         for f in data["findings"]:
             self.assertTrue({"id", "severity", "title", "detail", "fix"} <= set(f))
 
@@ -196,7 +228,7 @@ class AndroidCliTests(unittest.TestCase):
         self.assertIn("No issues found", out)
 
     def test_stdin_and_fail_on(self):
-        xml = f'<manifest {NS}><uses-sdk android:targetSdkVersion="34"/><application android:allowBackup="false"/></manifest>'
+        xml = f'<manifest {NS}><uses-sdk android:targetSdkVersion="36"/><application android:allowBackup="false"/></manifest>'
         code, out, _ = call_main(andr, ["-", "--json"], stdin=xml)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["findings"], [])
@@ -219,10 +251,18 @@ class AndroidCliTests(unittest.TestCase):
             self.assertEqual(call_main(andr, [str(notman)])[0], 2)
         self.assertEqual(call_main(andr, ["/nonexistent/secskills.xml"])[0], 2)
 
+    def test_required_target_flag(self):
+        xml = f'<manifest {NS}><uses-sdk android:targetSdkVersion="35"/><application android:allowBackup="false"/></manifest>'
+        code, out, _ = call_main(andr, ["-", "--json", "--fail-on", "low"], stdin=xml)
+        self.assertEqual((code, ids(json.loads(out)["findings"])), (1, {"AND-051"}))
+        code, out, _ = call_main(andr, ["-", "--json", "--fail-on", "low", "--required-target-sdk", "35"], stdin=xml)
+        self.assertEqual((code, json.loads(out)["findings"]), (0, []))
+
     def test_help(self):
         proc = run_cli("mobile-appsec", "android_manifest_audit", "--help")
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--target-sdk", proc.stdout)
+        self.assertIn("--required-target-sdk", proc.stdout)
 
 
 class IosAtsTests(unittest.TestCase):
@@ -304,14 +344,86 @@ class IosEntitlementTests(unittest.TestCase):
                                                  "com.apple.developer.associated-domains": ["applinks:a.example.test"]}), [])
 
 
+def privacy(**kw):
+    base = {"NSPrivacyTracking": False, "NSPrivacyTrackingDomains": [], "NSPrivacyCollectedDataTypes": [],
+            "NSPrivacyAccessedAPITypes": [{"NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+                                           "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]}]}
+    base.update(kw)
+    return ios.audit_privacy_manifest(base)
+
+
+class IosPrivacyManifestTests(unittest.TestCase):
+    def test_clean(self):
+        self.assertEqual(privacy(), [])
+        self.assertEqual(privacy(NSPrivacyTracking=True, NSPrivacyTrackingDomains=["ads.example.test"]), [])
+
+    def test_tracking_flag_and_domains(self):
+        self.assertEqual(ids(privacy(NSPrivacyTracking=True)), {"IOS-050"})
+        found = privacy(NSPrivacyTrackingDomains=["ads.example.test"])
+        self.assertEqual(ids(found), {"IOS-050"})
+        self.assertIn("ads.example.test", found[0]["detail"])
+
+    def test_collected_data(self):
+        entry = {"NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeEmailAddress",
+                 "NSPrivacyCollectedDataTypeLinked": True, "NSPrivacyCollectedDataTypeTracking": True,
+                 "NSPrivacyCollectedDataTypePurposes": ["NSPrivacyCollectedDataTypePurposeAnalytics"]}
+        found = privacy(NSPrivacyCollectedDataTypes=[entry])
+        self.assertEqual([(f["id"], f["severity"]) for f in found], [("IOS-051", "medium")])
+        self.assertEqual(privacy(NSPrivacyTracking=True, NSPrivacyTrackingDomains=["t.example.test"],
+                                 NSPrivacyCollectedDataTypes=[entry]), [])
+        partial = {"NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeEmailAddress"}
+        found = privacy(NSPrivacyCollectedDataTypes=[partial])
+        self.assertEqual([(f["id"], f["severity"]) for f in found], [("IOS-051", "low")])
+
+    def test_required_reasons(self):
+        def api(cat, reasons):
+            return privacy(NSPrivacyAccessedAPITypes=[{"NSPrivacyAccessedAPIType": cat,
+                                                       "NSPrivacyAccessedAPITypeReasons": reasons}])
+        self.assertEqual(api("NSPrivacyAccessedAPICategoryDiskSpace", ["E174.1", "85F4.1"]), [])
+        self.assertEqual(api("NSPrivacyAccessedAPICategorySystemBootTime", ["35F9.1"]), [])
+        self.assertEqual(ids(api("NSPrivacyAccessedAPICategoryUserDefault", ["CA92.1"])), {"IOS-052"})
+        self.assertEqual(ids(api("NSPrivacyAccessedAPICategoryFileTimestamp", [])), {"IOS-052"})
+        found = api("NSPrivacyAccessedAPICategoryDiskSpace", ["C617.1"])
+        self.assertEqual(ids(found), {"IOS-052"})
+        self.assertIn("C617.1", found[0]["detail"])
+
+    def test_cli_discovery_and_bundle_note(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d, "Payload", "Demo.app")
+            app.mkdir(parents=True)
+            info = app / "Info.plist"
+            info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "test.example.demo"}))
+            code, out, _ = call_main(ios, [str(info), "--json"])
+            data = json.loads(out)
+            self.assertEqual(ids(data["findings"]), {"IOS-053"})
+            self.assertFalse(data["privacy_manifest_checked"])
+            (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps({"NSPrivacyTracking": True}))
+            code, out, _ = call_main(ios, [str(info), "--json"])
+            data = json.loads(out)
+            self.assertEqual(ids(data["findings"]), {"IOS-050"})
+            self.assertTrue(data["privacy_manifest_checked"])
+            other = Path(d, "clean.xcprivacy")
+            other.write_bytes(plistlib.dumps({"NSPrivacyTracking": False}))
+            code, out, _ = call_main(ios, [str(info), "--json", "--privacy-manifest", str(other)])
+            self.assertEqual(json.loads(out)["findings"], [])
+            src = Path(d, "Info.plist")  # source tree, not a .app: no IOS-053
+            src.write_bytes(plistlib.dumps({"CFBundleIdentifier": "test.example.demo"}))
+            self.assertEqual(json.loads(call_main(ios, [str(src), "--json"])[1])["findings"], [])
+            bad = Path(d, "bad.xcprivacy")
+            bad.write_text("not a plist")
+            self.assertEqual(call_main(ios, [str(src), "--privacy-manifest", str(bad)])[0], 2)
+
+
 class IosCliTests(unittest.TestCase):
     def test_weak_example(self):
         code, out, _ = call_main(ios, [str(EX / "ios_weak" / "Info.plist"), "--entitlements",
                                        str(EX / "ios_weak" / "App.entitlements"), "--json"])
         self.assertEqual(code, 1)
         data = json.loads(out)
-        self.assertEqual(set(data), {"plist", "bundle_id", "minimum_os", "entitlements_checked", "findings"})
-        self.assertTrue({"IOS-001", "IOS-004", "IOS-030", "IOS-040"} <= ids(data["findings"]))
+        self.assertEqual(set(data), {"plist", "bundle_id", "minimum_os", "entitlements_checked",
+                                     "privacy_manifest_checked", "findings"})
+        self.assertTrue({"IOS-001", "IOS-004", "IOS-030", "IOS-040", "IOS-050", "IOS-051", "IOS-052"}
+                        <= ids(data["findings"]))
         self.assertNotIn("FAKE0000TEST", out)
 
     def test_hardened_example(self):
@@ -319,6 +431,7 @@ class IosCliTests(unittest.TestCase):
                                        str(EX / "ios_hardened" / "App.entitlements")])
         self.assertEqual(code, 0, out)
         self.assertIn("No issues found", out)
+        self.assertIn("privacy manifest checked", out)
 
     def test_binary_plist(self):
         with tempfile.TemporaryDirectory() as d:
@@ -342,6 +455,7 @@ class IosCliTests(unittest.TestCase):
         proc = run_cli("mobile-appsec", "ios_plist_audit", "--help")
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--entitlements", proc.stdout)
+        self.assertIn("--privacy-manifest", proc.stdout)
 
 
 if __name__ == "__main__":

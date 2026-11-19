@@ -17,17 +17,39 @@
       "Read(./secrets/**)",
       "Bash(curl:*)",
       "Bash(wget:*)"
-    ]
+    ],
+    "disableBypassPermissionsMode": "disable"
   },
-  "enabledMcpjsonServers": ["github"],
+  "enabledMcpjsonServers": [
+    "github"
+  ],
   "hooks": {
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "./scripts/format-changed.sh" }
+          {
+            "type": "command",
+            "command": "./scripts/format-changed.sh"
+          }
         ]
       }
     ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": [
+        "registry.npmjs.org",
+        "github.com"
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "~/.aws/credentials",
+        "~/.ssh"
+      ]
+    }
   }
 }

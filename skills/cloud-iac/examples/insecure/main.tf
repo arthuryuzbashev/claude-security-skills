@@ -64,3 +64,35 @@ resource "aws_db_instance" "main" {
   password            = "SuperSecret-not-real-1"
   publicly_accessible = true
 }
+
+resource "aws_instance" "worker" {
+  ami           = "ami-00000000000000000"
+  instance_type = "t3.micro"
+
+  root_block_device {
+    volume_size = 20
+  }
+}
+
+resource "aws_kms_key" "app" {
+  description = "app data key"
+}
+
+resource "aws_eks_cluster" "main" {
+  name     = "main"
+  role_arn = "arn:aws:iam::123456789012:role/eks"
+
+  vpc_config {
+    subnet_ids = ["subnet-00000000"]
+  }
+}
+
+resource "aws_lambda_function_url" "hook" {
+  function_name      = "hook"
+  authorization_type = "NONE"
+}
+
+resource "aws_cloudtrail" "main" {
+  name           = "main"
+  s3_bucket_name = "example-test-trail"
+}

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turn yes/partial/no answers on common security controls into framework coverage and a gap list.
 
-Each control maps to NIST CSF 2.0 categories, ISO/IEC 27001:2022 Annex A controls and
-SOC 2 Trust Services Criteria. The mapping is a starting point for a gap assessment,
+Each control maps to NIST CSF 2.0 categories, ISO/IEC 27001:2022 Annex A controls,
+SOC 2 Trust Services Criteria and EU NIS2 (Directive 2022/2555) Articles 20, 21(2) and 23. The mapping is a starting point for a gap assessment,
 not audit advice: coverage only counts the framework items this list touches.
 
 Usage:
@@ -157,7 +157,7 @@ CONTROLS: List[Dict[str, Any]] = [dict(zip(("key", "title", "question", "priorit
      "Subscribe to vendor and government advisories and the CISA KEV catalog; feed them into patch priorities."),
     ("security_testing", "Security testing",
      "Are penetration tests or equivalent assessments done at least yearly and after major changes?", "medium",
-     ["ID.RA", "ID.IM"], ["8.29"], ["CC4.1"],
+     ["ID.RA", "ID.IM"], ["8.8", "8.29"], ["CC4.1"],
      "Commission a yearly pentest of internet-facing systems and track findings to closure with retests."),
     ("data_loss_prevention", "Data leakage prevention",
      "Are there controls against sensitive data leaving (sharing settings, DLP rules, USB limits)?", "medium",
@@ -177,8 +177,9 @@ CONTROLS: List[Dict[str, Any]] = [dict(zip(("key", "title", "question", "priorit
      "Give one easy channel (report-phish button, security email), confirm reports, thank reporters."),
     ("management_oversight", "Management oversight",
      "Does leadership review security status, risks and incidents at least twice a year?", "medium",
-     ["GV.OV"], ["5.35"], ["CC1.2"],
-     "Put security on the leadership agenda with a short dashboard: top risks, incidents, overdue fixes."),
+     ["GV.OV"], [], ["CC1.2"],
+     "Put security on the leadership agenda with a short dashboard: top risks, incidents, overdue fixes. "
+     "ISO 27001 requires this as the management review in clause 9.3, not Annex A."),
     ("endpoint_devices", "Managed endpoint devices",
      "Are laptops and phones that access company data enrolled in device management with screen lock and updates?", "medium",
      ["PR.PS"], ["8.1", "6.7"], [],
@@ -187,7 +188,68 @@ CONTROLS: List[Dict[str, Any]] = [dict(zip(("key", "title", "question", "priorit
      "Do you keep a list of legal, contractual and privacy obligations (e.g. GDPR) and who meets each?", "medium",
      ["GV.OC"], ["5.31", "5.34"], [],
      "List the laws, contracts and certifications that apply, assign owners, review yearly."),
+    ("incident_notification", "Regulatory incident notification",
+     "Do you know which incidents must be reported to regulators, CSIRTs or customers and by when "
+     "(e.g. NIS2 24h early warning, 72h notification, 1 month final report; GDPR 72h), and who files them?", "high",
+     ["RS.CO"], ["5.5", "5.24", "5.26"], ["CC2.3", "CC7.4"],
+     "Write down each reporting duty with its clock, recipient and owner; add the forms and contacts to the IR plan "
+     "and practise a notification in the next tabletop."),
+    ("vuln_disclosure", "Vulnerability disclosure",
+     "Can outsiders report vulnerabilities (security.txt, disclosure policy) and are their reports triaged and fixed?",
+     "medium",
+     ["ID.RA"], ["8.8"], ["CC2.3", "CC7.1"],
+     "Publish a disclosure policy and /.well-known/security.txt, route reports to a tracked queue, reply within days. "
+     "The EU Cyber Resilience Act makes this mandatory for products with digital elements."),
+    ("software_supply_chain", "Software supply chain and SBOM",
+     "For software you build or ship, do you know its third-party components (SBOM), keep them updated and "
+     "protect the build pipeline?", "medium",
+     ["GV.SC", "ID.AM"], ["5.21", "8.28"], ["CC8.1", "CC9.2"],
+     "Generate an SBOM in CI (CycloneDX or SPDX), alert on vulnerable dependencies, pin and review third-party "
+     "build actions, and restrict who can publish releases."),
 ]]
+# EU NIS2 (Directive 2022/2555): Art.20 governance, Art.21(2)(a)-(j) risk-management measures, Art.23 reporting.
+# Letters follow Art.21(2); the section in the comment is the matching part of the Annex to Implementing Regulation
+# (EU) 2024/2690, which sets the detailed measures for digital infrastructure and digital provider entities.
+NIS2 = {
+    "mfa": ["Art.21(2)(j)"],                                  # 11 access control (MFA)
+    "asset_inventory": ["Art.21(2)(i)"],                      # 12 asset management
+    "central_logging": ["Art.21(2)(b)"],                      # 3 monitoring and logging
+    "monitoring_alerting": ["Art.21(2)(b)"],                  # 3 event reporting
+    "backups": ["Art.21(2)(c)"],                              # 4 backup and redundancy
+    "encryption_at_rest": ["Art.21(2)(h)"],                   # 9 cryptography
+    "encryption_in_transit": ["Art.21(2)(h)"],
+    "vuln_management": ["Art.21(2)(e)"],                      # 6 patch management, 6.10 vulnerabilities
+    "ir_plan": ["Art.21(2)(b)"],                              # 3 incident handling
+    "security_awareness": ["Art.21(2)(g)", "Art.20"],         # 8 cyber hygiene and training; Art.20(2) management training
+    "access_reviews": ["Art.21(2)(i)"],                       # 11 access control
+    "vendor_risk": ["Art.21(2)(d)"],                          # 5 supply chain security
+    "privileged_access": ["Art.21(2)(i)"],
+    "joiner_mover_leaver": ["Art.21(2)(i)"],                  # 10 HR security, 11 access control
+    "security_policy": ["Art.21(2)(a)"],                      # 1 security policy
+    "security_roles": ["Art.20", "Art.21(2)(a)"],             # 1 roles and responsibilities
+    "risk_assessment": ["Art.21(2)(a)"],                      # 2 risk management policy
+    "endpoint_protection": ["Art.21(2)(e)"],                  # 6.9 protection against malicious software
+    "secure_configuration": ["Art.21(2)(e)"],                 # 6 configuration management
+    "change_management": ["Art.21(2)(e)"],                    # 6 change management
+    "network_security": ["Art.21(2)(e)"],                     # 6.7 network security
+    "network_segmentation": ["Art.21(2)(e)"],                 # 6.8 network segmentation
+    "secure_sdlc": ["Art.21(2)(e)"],                          # 6 secure development life cycle
+    "data_classification": ["Art.21(2)(i)"],                  # 12 asset classification
+    "business_continuity": ["Art.21(2)(c)"],                  # 4 business continuity and crisis management
+    "secure_disposal": ["Art.21(2)(i)"],                      # 12 asset handling and disposal
+    "secrets_management": ["Art.21(2)(i)"],                   # 11 authentication
+    "security_testing": ["Art.21(2)(e)", "Art.21(2)(f)"],     # 6 security testing, 7 effectiveness
+    "cloud_security": ["Art.21(2)(e)"],
+    "hr_security": ["Art.21(2)(i)"],                          # 10 human resources security
+    "incident_reporting": ["Art.21(2)(b)"],
+    "management_oversight": ["Art.20", "Art.21(2)(f)"],       # management approves and oversees the measures
+    "endpoint_devices": ["Art.21(2)(g)"],                     # 8 basic cyber hygiene
+    "incident_notification": ["Art.23"],
+    "vuln_disclosure": ["Art.21(2)(e)"],                      # 6.10 vulnerability handling and disclosure
+    "software_supply_chain": ["Art.21(2)(d)", "Art.21(2)(e)"],
+}
+for _c in CONTROLS:
+    _c["nis2"] = NIS2.get(_c["key"], [])
 for _n, _c in enumerate(CONTROLS, 1):
     _c["code"] = f"CTL-{_n:02d}"
 BY_KEY = {c["key"]: c for c in CONTROLS}
@@ -199,7 +261,8 @@ ANSWER_WORDS = {
     "na": "na", "n/a": "na", "not-applicable": "na", "not_applicable": "na",
 }
 SCORES = {"yes": 1.0, "partial": 0.5, "no": 0.0}
-FRAMEWORKS = [("csf", "NIST CSF 2.0"), ("iso", "ISO/IEC 27001:2022 Annex A"), ("soc2", "SOC 2 TSC")]
+FRAMEWORKS = [("csf", "NIST CSF 2.0"), ("iso", "ISO/IEC 27001:2022 Annex A"), ("soc2", "SOC 2 TSC"),
+              ("nis2", "EU NIS2 Art. 20, 21(2), 23")]
 
 
 def lookup(name: str) -> Optional[Dict[str, Any]]:
@@ -304,7 +367,8 @@ def assess(answers: Dict[str, Dict[str, str]], include_unanswered: bool = True) 
                  f"{c['title']}: partly in place" if st == "partial" else f"{c['title']}: not assessed")
         refs = (["CSF " + ", ".join(c["csf"])] if c["csf"] else []) + \
                (["ISO " + ", ".join(c["iso"])] if c["iso"] else []) + \
-               (["SOC 2 " + ", ".join(c["soc2"])] if c["soc2"] else [])
+               (["SOC 2 " + ", ".join(c["soc2"])] if c["soc2"] else []) + \
+               (["NIS2 " + ", ".join(c["nis2"])] if c["nis2"] else [])
         note = answers.get(c["key"], {}).get("note", "")
         detail = c["question"] + (f" Answer note: {note}" if note else "") + \
             ("" if answered else " No answer given, counted as a gap.")
@@ -343,10 +407,11 @@ def render_text(result: Dict[str, Any]) -> str:
 
 
 def render_list() -> str:
-    L = ["| Code | Key | Control | Priority | NIST CSF 2.0 | ISO 27001:2022 | SOC 2 |", "|---|---|---|---|---|---|---|"]
+    L = ["| Code | Key | Control | Priority | NIST CSF 2.0 | ISO 27001:2022 | SOC 2 | NIS2 |",
+         "|---|---|---|---|---|---|---|---|"]
     for c in CONTROLS:
         L.append(f"| {c['code']} | {c['key']} | {c['title']} | {c['priority']} | {', '.join(c['csf'])} | "
-                 f"{', '.join(c['iso']) or '-'} | {', '.join(c['soc2']) or '-'} |")
+                 f"{', '.join(c['iso']) or '-'} | {', '.join(c['soc2']) or '-'} | {', '.join(c['nis2']) or '-'} |")
     L += ["", f"Note: {DISCLAIMER}"]
     return "\n".join(L) + "\n"
 
@@ -360,7 +425,7 @@ def render_template() -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Map security control answers to NIST CSF 2.0, ISO 27001:2022 and SOC 2 coverage.")
+    ap = argparse.ArgumentParser(description="Map security control answers to NIST CSF 2.0, ISO 27001:2022, SOC 2 and NIS2 coverage.")
     ap.add_argument("file", nargs="?", help="answers file (text, CSV or JSON); '-' for stdin")
     ap.add_argument("--template", action="store_true", help="print a blank answers file and exit")
     ap.add_argument("--list", action="store_true", help="print the control mapping table and exit")

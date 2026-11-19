@@ -96,6 +96,92 @@ class StrideTests(unittest.TestCase):
         self.assertEqual((s01["likelihood"], s01["impact"], s01["severity"]), (1, 1, "low"))
 
 
+class LlmTests(unittest.TestCase):
+    BOT = {"id": "bot", "type": "llm", "zone": "internal", "logging": True}
+    VEC = {"id": "vec", "type": "db", "zone": "data", "logging": True}
+    EXT = {"id": "mail", "type": "external", "zone": "third-party"}
+
+    def test_owasp_2025_threats(self):
+        r = run([USER, self.BOT], [{"from": "u", "to": "bot", "protocol": "https", "auth": "session"}])
+        found = {f["id"] for f in r["findings"]}
+        self.assertTrue({"LLM-I02", "LLM-T03"} <= found)
+        self.assertIn("LLM10", [f["title"] for f in r["findings"] if f["id"] == "LLM-D01"][0])
+        self.assertFalse([f for f in r["findings"] if f["id"].startswith(("LLM", "PRV")) and not f["title"]])
+        r = run([USER, API], [{"from": "u", "to": "api", "protocol": "https", "auth": "session"}])
+        self.assertFalse([f for f in r["findings"] if f["id"].startswith("LLM")])
+
+    def test_vector_store_threat(self):
+        r = run([USER, self.BOT, self.VEC], [{"from": "u", "to": "bot", "protocol": "https", "auth": "session"},
+                                             {"from": "bot", "to": "vec", "protocol": "https", "auth": "iam"}])
+        t02 = [f for f in r["findings"] if f["id"] == "LLM-T02"]
+        self.assertEqual(len(t02), 1)
+        self.assertIn("vec", t02[0]["detail"])
+        r = run([USER, self.BOT], [{"from": "u", "to": "bot", "protocol": "https", "auth": "session"}])
+        self.assertNotIn("LLM-T02", {f["id"] for f in r["findings"]})
+
+    def test_private_untrusted_outbound_flag(self):
+        flows = [{"from": "u", "to": "bot", "protocol": "https", "auth": "session"},
+                 {"from": "bot", "to": "vec", "protocol": "https", "auth": "iam", "data": "confidential"},
+                 {"from": "bot", "to": "mail", "protocol": "https", "auth": "apikey"}]
+        r = run([USER, self.BOT, self.VEC, self.EXT], flows)
+        hit = [f for f in r["findings"] if f["id"] == "ELEM-004"]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["severity"], "high")
+        # no outbound channel: no flag
+        r = run([USER, self.BOT, self.VEC], flows[:2])
+        self.assertNotIn("ELEM-004", flag_ids(r))
+        # no untrusted input: no flag
+        r = run([dict(API, zone="internal"), self.BOT, self.VEC, self.EXT],
+                [{"from": "api", "to": "bot", "protocol": "https", "auth": "iam"}] + flows[1:])
+        self.assertNotIn("ELEM-004", flag_ids(r))
+
+
+class PrivacyTests(unittest.TestCase):
+    FLOWS = [{"from": "u", "to": "api", "protocol": "https", "auth": "session", "data": "health"},
+             {"from": "api", "to": "db", "protocol": "postgres+tls", "auth": "iam", "data": "pii"}]
+
+    def privacy_ids(self, result):
+        return [f["id"] for f in result["findings"] if f["kind"] == "privacy"]
+
+    def test_off_by_default(self):
+        r = run([USER, API, DB], self.FLOWS)
+        self.assertEqual(self.privacy_ids(r), [])
+        self.assertEqual(r["summary"]["privacy_threats"], 0)
+
+    def test_linddun_threats(self):
+        r = sm.build(model([USER, API, DB], self.FLOWS), privacy=True)
+        ids = self.privacy_ids(r)
+        self.assertTrue({"PRV-DD01", "PRV-U01", "PRV-D01", "PRV-N01", "PRV-L01", "PRV-I01", "PRV-NC01"} <= set(ids))
+        self.assertEqual(r["summary"]["privacy_threats"], len(ids))
+        d01 = [f for f in r["findings"] if f["id"] == "PRV-D01"][0]
+        self.assertEqual((d01["linddun"], d01["likelihood"]), ("D", 3))
+        self.assertIn("## LINDDUN privacy threats", sm.render_markdown(r))
+
+    def test_only_personal_data(self):
+        flows = [dict(f, data="confidential") for f in self.FLOWS]
+        r = sm.build(model([USER, API, DB], flows), privacy=True)
+        self.assertEqual(self.privacy_ids(r), [])
+        flows = [dict(self.FLOWS[0], data="pii"), self.FLOWS[1]]
+        r = sm.build(model([USER, API, DB], flows), privacy=True)
+        self.assertNotIn("PRV-N01", self.privacy_ids(r))
+
+    def test_third_party_and_model_switch(self):
+        text = json.dumps({"privacy": True, "components": [API, {"id": "ads", "type": "external", "zone": "third-party"}],
+                           "flows": [{"from": "api", "to": "ads", "protocol": "https", "auth": "apikey", "data": "location"}]})
+        r = sm.build(sm.load_model(text))
+        self.assertIn("PRV-L02", self.privacy_ids(r))
+        self.assertEqual(sm.build(sm.load_model(text), privacy=False)["summary"]["privacy_threats"], 0)
+
+    def test_cli_flag(self):
+        code, out, _ = call_main(sm, [V2, "--json", "--privacy", "--fail-on", "never"])
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertGreater(d["summary"]["privacy_threats"], 0)
+        for f in d["findings"]:
+            if f["kind"] == "privacy":
+                self.assertTrue(f["id"].startswith("PRV-") and f["linddun"])
+
+
 class FlagTests(unittest.TestCase):
     def test_unauthenticated_inbound(self):
         r = run([USER, API], [{"from": "u", "to": "api", "protocol": "https", "auth": "none", "data": "pii"}])

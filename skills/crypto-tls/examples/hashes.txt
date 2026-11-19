@@ -6,3 +6,6 @@ $6$rounds=656000$exampleSALT$Ry7RbSnL2v1a1EuB1lGQaTfMGMYBXAJx0E7jHyJ2wq1ZJrOEBrV
 $1$abcdefgh$G//4keteveJwXGwYz8Qi71
 pbkdf2_sha256$600000$fakeSalt123$Ue8F1Rb9pZzT4g5gP2nQ0xYkq3m3x6f9o7HdT1bq2Gk=
 not-a-hash-at-all
+$P$BfakeSaltFakeHashFakeHashFake12
+$wp$2y$10$FAKEexampleSaltValue/fakeHashFakeHashFakeHashFakeHash
+{SSHA}RkFLRWZha2VGQUtFZmFrZUZBS0VzYWx0

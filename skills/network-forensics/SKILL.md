@@ -1,6 +1,6 @@
 ---
 name: network-forensics
-description: Offline network forensics on saved packet captures and connection logs, no tshark or scapy needed. Summarizes pcap/pcapng files (top talkers, conversations, protocols, ports, DNS queries and NXDOMAINs, HTTP Host and User-Agent, TLS SNI) and flags DNS tunneling or DGA-looking names, suspicious ports like 4444, HTTP straight to an IP, scripted clients and port scans. Scores Zeek conn.log, CSV or JSON connection records for C2 beaconing (regular intervals, steady sizes). Use whenever someone shares a .pcap/.pcapng, Zeek or firewall/NetFlow export, asks "what is this host talking to", "is this C2", "find beacons", "is someone exfiltrating over DNS", "what happened on the wire", or needs network IOCs for an incident.
+description: Offline network forensics on saved packet captures and connection logs, no tshark or scapy needed. Summarizes pcap/pcapng files (top talkers, conversations, protocols, ports, DNS queries and NXDOMAINs, HTTP Host and User-Agent, TLS SNI, JA4 client fingerprints) and flags DNS tunneling or DGA-looking names, DoH/DoT to public resolvers, TLS without SNI, suspicious ports like 4444, HTTP straight to an IP, scripted clients and port scans. Scores Zeek conn.log, Suricata eve.json, CSV or JSON connection records for C2 beaconing (regular intervals, steady sizes, by IP or by domain) and long-lived sessions. Use when someone shares a .pcap/.pcapng, Zeek, Suricata or firewall/NetFlow export, asks "what is this host talking to", "is this C2", "find beacons", "is someone exfiltrating over DNS", "what happened on the wire", or needs network IOCs or JA4 fingerprints for an incident.
 ---
 
 # Network Forensics
@@ -12,7 +12,7 @@ Turn a capture or a connection log into "who talked to whom, how, and what looks
 - An incident responder hands over a pcap from a sensor, a laptop or a cloud mirror
 - A host is suspected of command-and-control (C2) and someone exported Zeek, firewall or flow logs
 - Checking for DNS tunneling, DGA lookups, scans or cleartext downloads
-- Pulling network IOCs (IPs, domains, SNI, User-Agents) for blocking and hunting
+- Pulling network IOCs (IPs, domains, SNI, User-Agents, JA4) for blocking and hunting
 
 ## Ground rules
 
@@ -33,7 +33,8 @@ Turn a capture or a connection log into "who talked to whom, how, and what looks
    - Ports (NET-010..011): known backdoor or Tor ports, then rare ports talking to public IPs
    - HTTP (NET-020..022): cleartext requests to a bare IP, tool User-Agents (curl, PowerShell, python-requests) and HTTP on odd ports often carry stage two downloads
    - Scans (NET-030) and odd SNI (NET-040)
-5. For long windows use connection logs instead of full captures: run `beacon_detect.py` on Zeek `conn.log`, a firewall CSV or flow JSON. Add `--allow` for known updaters and resolvers and run again
+   - Encrypted DNS (NET-041) and TLS to a bare public IP without SNI (NET-042). Group TLS clients by JA4 (`tls_ja4`): one fingerprint reaching many odd names is one tool, whatever the IPs
+5. For long windows use connection logs instead of full captures: run `beacon_detect.py` on Zeek `conn.log`, Suricata `eve.json`, a firewall CSV or flow JSON. Add `--allow` for known updaters and resolvers and run again. Use `--by-name` on Zeek `dns.log`/`ssl.log` or eve dns/tls events when the C2 rotates IPs behind a CDN. Read the BCN-002 long-lived sessions too
 6. Pivot: for each lead, name the internal host, the remote endpoint, first and last seen, and what else that host did around those times
 7. Write the report (below) and list IOCs for blocking and for a wider hunt across other hosts
 
@@ -48,7 +49,9 @@ python3 scripts/pcap_summary.py capture.pcap --fail-on medium     # exit 1 at me
 cat capture.pcap | python3 scripts/pcap_summary.py -
 ```
 
-Reads classic pcap (micro and nanosecond, either byte order) and pcapng (SHB, IDB with `if_tsresol`, EPB, SPB). Link types: Ethernet with VLAN tags, Linux cooked v1/v2, raw IP, BSD loopback. IPv4 and IPv6 (extension headers), TCP, UDP, DNS over UDP and TCP, HTTP requests in one segment, TLS ClientHello SNI. It does not reassemble TCP streams, so data split across segments is missed.
+Reads classic pcap (micro and nanosecond, either byte order) and pcapng (SHB, IDB with `if_tsresol`, EPB, SPB). Link types: Ethernet with VLAN tags, Linux cooked v1/v2, raw IP, BSD loopback. IPv4 and IPv6 (extension headers), TCP, UDP, DNS over UDP and TCP, HTTP requests in one segment, TLS ClientHello (SNI, ALPN, JA4). It does not reassemble TCP streams, so data split across segments is missed, and it does not decode QUIC (no `q` JA4 prefixes).
+
+JA4 follows the FoxIO spec (BSD 3-Clause; only the client `JA4` is computed, the other JA4+ methods are under the FoxIO License and are not implemented). Compare values with Zeek's JA4 package or Suricata 8 (`ja4: yes` in the eve tls output and `app-layer.protocols.tls.ja4-fingerprints: yes`, off by default). A JA4 names a TLS library and its settings, not a program: curl, Python and malware built on the same library can share one.
 
 | ID | Severity | Finding |
 |---|---|---|
@@ -63,8 +66,10 @@ Reads classic pcap (micro and nanosecond, either byte order) and pcapng (SHB, ID
 | NET-022 | low | HTTP request on a non-standard port |
 | NET-030 | high | one source sent SYNs to 20+ ports on one target |
 | NET-040 | low | odd TLS SNI (same rules as NET-001) |
+| NET-041 | low | encrypted DNS: a public DoH resolver name in SNI, or TCP/853 (DoT) to a public IP |
+| NET-042 | low | TLS ClientHello without SNI to a public IP |
 
-`--json` keys: `format`, `linktypes`, `packets`, `bytes`, `undecoded`, `first_ts`, `last_ts`, `duration_s`, `protocols`, `top_talkers`, `top_conversations`, `ports`, `dns_queries` `[{name, type, count}]`, `dns_nxdomain` (top names), `dns_nxdomain_total`, `http_requests` `[{host, user_agent, method, dst, port, count}]`, `tls_sni` `[{server_name, dst, port, count}]`, `findings`.
+`--json` keys: `format`, `linktypes`, `packets`, `bytes`, `undecoded`, `first_ts`, `last_ts`, `duration_s`, `protocols`, `top_talkers`, `top_conversations`, `ports`, `dns_queries` `[{name, type, count}]`, `dns_nxdomain` (top names), `dns_nxdomain_total`, `http_requests` `[{host, user_agent, method, dst, port, count}]`, `tls_sni` `[{server_name, dst, port, count}]`, `tls_ja4` `[{ja4, count, alpn, server_names, clients}]`, `tls_no_sni` `[{dst, port, count}]`, `findings`.
 Exit `0` nothing at/above `--fail-on` (default `high`), `1` findings at/above it, `2` unreadable, empty or non-capture input. RFC 5737 / 3849 documentation addresses count as external so the samples behave like internet traffic.
 
 ### beacon_detect.py
@@ -73,6 +78,8 @@ Exit `0` nothing at/above `--fail-on` (default `high`), `1` findings at/above it
 python3 scripts/beacon_detect.py conn.log
 python3 scripts/beacon_detect.py firewall.csv --min-conns 10 --allow 192.0.2.53 --allow 10.20.0.0/16
 python3 scripts/beacon_detect.py flows.jsonl --json --fail-on medium
+python3 scripts/beacon_detect.py eve.json --long-conn 7200        # Suricata; flow events only
+python3 scripts/beacon_detect.py dns.log --by-name                # group by queried name, not resolver IP
 ```
 
 Groups connections by (source, destination, destination port) and scores each group with at least `--min-conns` (default 6) connections from 0 to 100:
@@ -84,8 +91,9 @@ Groups connections by (source, destination, destination port) and scores each gr
 | Count | 15% | full marks at 31+ connections |
 | Coverage | 15% | share of the whole log window between first and last connection |
 
-Score 80+ is high, 65+ medium, 50+ low, all as `BCN-001`. Inputs: Zeek `conn.log` (TSV with `#fields`, `-` = unset), CSV with a header, JSON array or JSON lines; column names are listed in the script's help text. Times may be epoch (s, ms, us, ns) or ISO 8601.
-`--json` keys: `format`, `records`, `skipped`, `ignored_by_allow`, `groups`, `window_s`, `candidates` (per-flow stats and score), `findings`. Exit codes as above.
+Score 80+ is high, 65+ medium, 50+ low, all as `BCN-001`. `BCN-002` lists connections lasting `--long-conn` seconds or more (default 3600, low; medium at 8 h; `0` turns it off), the persistent-session pattern that interval scoring cannot see.
+Inputs: Zeek `conn.log` (TSV with `#fields`, `-` = unset, or Zeek JSON), Suricata `eve.json` (nested fields are flattened; when flow events exist only they are counted, so alert/dns/tls events do not double-count), CSV with a header, JSON array or JSON lines; column names are listed in the script's help text. Times may be epoch (s, ms, us, ns) or ISO 8601. `--by-name` groups by `query`, `server_name`, `host`, `dns.rrname` or `tls.sni` instead of the destination IP (the name lands in the `dst` field).
+`--json` keys: `format`, `records`, `skipped`, `ignored_by_allow`, `groups`, `window_s`, `candidates` (per-flow stats and score), `findings`, `long_connections` `[{src, dst, dport, connections, longest_s, total_s}]`, `other_events_skipped`, `grouped_by`. Exit codes as above.
 
 Things that beacon and are not malware: NTP, update checkers, EDR/AV heartbeats, monitoring agents, mail clients polling, chat apps, cloud sync. Allow-list them once confirmed. Malware that sleeps with large random jitter or talks rarely (hours apart) will score low; widen the window and lower `--min-conns` when hunting for slow beacons.
 
@@ -103,5 +111,5 @@ Things that beacon and are not malware: NTP, update checkers, EDR/AV heartbeats,
 
 ## References
 
-- `references/protocol-cheatsheet.md` ports, DNS record types, tunneling and DGA tells, HTTP and TLS fields worth reading, capture formats and link types
-- `references/beacon-hunting.md` how beacon scoring works, tuning, common false positives, C2 triage steps and ATT&CK IDs for network findings
+- `references/protocol-cheatsheet.md` ports, DNS record types, tunneling and DGA tells, encrypted DNS, HTTP and TLS fields, JA4 layout, Zeek 8 and Suricata 8 log notes, capture formats and link types
+- `references/beacon-hunting.md` how beacon scoring works, long connections, tuning, common false positives, C2 triage steps and ATT&CK IDs for network findings

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Fictional app for testing. Not a real package. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="test.example.weakwallet">
+    package="test.example.weakwallet"
+    android:sharedUserId="test.example.shared">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30" />
 
@@ -18,6 +19,7 @@
     <application
         android:label="Weak Wallet"
         android:debuggable="true"
+        android:allowTaskReparenting="true"
         android:allowBackup="true"
         android:networkSecurityConfig="@xml/network_security_config">
 

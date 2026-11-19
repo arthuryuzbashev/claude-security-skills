@@ -3,12 +3,15 @@
 
 A small, offline Sigma evaluator for testing rules before deployment. It
 supports field modifiers contains, startswith, endswith, re, all, exists,
-cased and i/m/s regex flags, `*` and `?` wildcards, null, keyword lists,
+cased, i/m/s regex flags, windash, cidr, gt/gte/lt/lte and neq (Sigma
+2.1), `*` and `?` wildcards, null, keyword lists,
 dotted field paths (process.command_line), and conditions with and, or,
 not, parentheses, `1 of selection*`, `all of filter_*` and `1 of them`.
 Matching is case-insensitive like Sigma, except `re` and `cased`.
 
-Pipe aggregations (`| count() > 5`) are not evaluated (exit 2).
+Pipe aggregations (`| count() > 5`), correlation rules, encoding modifiers
+(base64, base64offset, utf16*, wide), time modifiers and expand/fieldref are
+not evaluated (exit 2).
 
 Usage:
   detection_test.py rule.yml --events events.jsonl
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -33,7 +37,12 @@ _lint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_lint)
 YamlError, collect_files, load_rules = _lint.YamlError, _lint.collect_files, _lint.load_rules
 
-KNOWN_MODS = {"contains", "startswith", "endswith", "all", "re", "i", "m", "s", "exists", "cased"}
+KNOWN_MODS = {"contains", "startswith", "endswith", "all", "re", "i", "m", "s", "exists", "cased",
+              "windash", "cidr", "gt", "gte", "lt", "lte", "neq"}
+# windash: a flag may start with any of these characters (Sigma spec v2.1).
+WINDASH_CHARS = "-/\u2013\u2014\u2015"
+_WINDASH_TABLE = str.maketrans({c: "-" for c in WINDASH_CHARS})
+_NUM_OPS = {"gt": lambda a, b: a > b, "gte": lambda a, b: a >= b, "lt": lambda a, b: a < b, "lte": lambda a, b: a <= b}
 
 
 class RuleError(ValueError):
@@ -84,6 +93,21 @@ def value_matches(actual: Any, expected: Any, mods: List[str]) -> bool:
         return False
     if isinstance(actual, list):
         return any(value_matches(a, expected, mods) for a in actual)
+    num_op = next((m for m in mods if m in _NUM_OPS), None)
+    if num_op:
+        try:
+            return _NUM_OPS[num_op](float(actual), float(expected))
+        except (TypeError, ValueError):
+            return False
+    if "cidr" in mods:
+        try:
+            net = ipaddress.ip_network(str(expected), strict=False)
+        except ValueError:
+            raise RuleError(f"invalid CIDR {expected!r}")
+        try:
+            return ipaddress.ip_address(str(actual).strip()) in net
+        except ValueError:
+            return False
     if isinstance(expected, bool) or isinstance(actual, bool):
         return str(actual).lower() == str(expected).lower()
     if isinstance(expected, (int, float)) and not mods:
@@ -92,6 +116,8 @@ def value_matches(actual: Any, expected: Any, mods: List[str]) -> bool:
         except (TypeError, ValueError):
             return False
     text, pat = str(actual), str(expected)
+    if "windash" in mods:
+        text, pat = text.translate(_WINDASH_TABLE), pat.translate(_WINDASH_TABLE)
     if "re" in mods:
         flags = (re.I if "i" in mods else 0) | (re.M if "m" in mods else 0) | (re.S if "s" in mods else 0)
         return re.search(pat, text, flags) is not None
@@ -113,6 +139,10 @@ def field_matches(event: Dict, key: str, expected: Any) -> bool:
     values = expected if isinstance(expected, list) else [expected]
     if not values:
         return False
+    if "neq" in mods:
+        # neq: the field exists and differs from every listed value.
+        rest = [m for m in mods if m != "neq"]
+        return found and actual is not None and not any(value_matches(actual, v, rest) for v in values)
     test = all if "all" in mods else any
     return test(value_matches(actual, v, mods) for v in values)
 
@@ -246,6 +276,8 @@ class Condition:
 # ---------------------------------------------------------------- running rules
 
 def compile_rule(rule: Dict) -> Dict:
+    if isinstance(rule, dict) and "correlation" in rule:
+        raise RuleError("correlation rules are not evaluated; test each base rule, then check the threshold in the SIEM")
     if not isinstance(rule, dict) or not isinstance(rule.get("detection"), dict):
         raise RuleError("rule has no detection block")
     det = rule["detection"]

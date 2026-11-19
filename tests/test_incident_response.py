@@ -201,5 +201,88 @@ class TriagePlanTests(unittest.TestCase):
         self.assertEqual(run_cli("incident-response", "triage_plan", "--help").returncode, 0)
 
 
+class IdentityLogTests(unittest.TestCase):
+    def test_entra_okta_and_m365_records(self):
+        recs = [
+            {"createdDateTime": "2026-03-04T10:00:00Z", "userPrincipalName": "deploy@example.test",
+             "ipAddress": "203.0.113.45", "appDisplayName": "Office 365 Exchange Online"},
+            {"published": "2026-03-04T10:05:00.000Z", "eventType": "user.session.start",
+             "displayMessage": "User login to Okta", "client": {"ipAddress": "203.0.113.46"}},
+            {"CreationTime": "2026-03-04T10:07:00", "Operation": "New-InboxRule", "ClientIP": "203.0.113.47"},
+        ]
+        events, skipped = tl.load_events("\n".join(json.dumps(r) for r in recs), "idp.jsonl", OPTS)
+        self.assertEqual(skipped, 0)
+        self.assertEqual([e["host"] for e in events], ["203.0.113.45", "203.0.113.46", "203.0.113.47"])
+        self.assertTrue(events[1]["message"].startswith("User login to Okta"))
+        self.assertTrue(events[2]["message"].startswith("New-InboxRule"))
+
+    def test_old_fields_still_win(self):
+        rec = {"timestamp": "2026-03-04T09:00:00Z", "createdDateTime": "2026-03-04T10:00:00Z", "msg": "x"}
+        events, _ = tl.load_events(json.dumps(rec), "x.jsonl", OPTS)
+        self.assertEqual(events[0]["time"], "2026-03-04T09:00:00.000Z")
+
+
+class IntegrityTests(unittest.TestCase):
+    def ev(self, minute, msg, source="a.log"):
+        return tl._event(at(2026, 3, 4, 10, 0) + timedelta(minutes=minute), source, "h1", msg, "")
+
+    def test_tampering_found(self):
+        evs = [self.ev(0, "The audit log was cleared. Account: x | Id=1102"),
+               self.ev(1, "eventName=StopLogging userIdentity=deploy"),
+               self.ev(2, "sudo bash -c 'history -c'"),
+               self.ev(3, "cmd: wevtutil.exe cl Security"),
+               self.ev(4, "rm -f /var/log/auth.log")]
+        self.assertEqual(len(tl.find_tampering(evs)), 5)
+
+    def test_normal_events_not_tampering(self):
+        evs = [self.ev(0, "An account was successfully logged on | Id=4624"),
+               self.ev(1, "eventName=StopLoggingService"),
+               self.ev(2, "cat /var/log/auth.log | grep sshd"),
+               self.ev(3, "history | tail")]
+        self.assertEqual(tl.find_tampering(evs), [])
+
+    def test_gaps_per_source(self):
+        evs = [self.ev(0, "a"), self.ev(5, "b"), self.ev(130, "c"), self.ev(60, "x", "b.log"), self.ev(70, "y", "b.log")]
+        evs.sort(key=lambda e: e["epoch"])
+        gaps = tl.find_gaps(evs, 60)
+        self.assertEqual([(g["source"], g["minutes"]) for g in gaps], [("a.log", 125.0)])
+        self.assertEqual(tl.find_gaps(evs, 200), [])
+
+    def test_cli_flags(self):
+        files = [str(EX / n) for n in sorted(os.listdir(EX))]
+        code, out, _ = call_main(tl, files + ["--year", "2026", "--format", "json", "--flag-tampering", "--gaps", "60"])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(set(data), {"count", "sources", "skipped", "events", "tampering", "gaps"})
+        self.assertEqual([t["reason"] for t in data["tampering"]], ["Windows event log cleared"])
+        code, out, _ = call_main(tl, files + ["--year", "2026", "--format", "json"])
+        self.assertEqual(set(json.loads(out)), {"count", "sources", "skipped", "events"})
+        code, out, _ = call_main(tl, files + ["--year", "2026", "--flag-tampering"])
+        self.assertIn("Possible log tampering: 1", out)
+        self.assertEqual(call_main(tl, files + ["--gaps", "0"])[0], 2)
+
+
+class CloudAndReportTests(unittest.TestCase):
+    def test_cloud_compromise_contains_first_without_host_steps(self):
+        plan = tp.build_plan("cloud-compromise", "linux")
+        phases = [s["phase"] for s in plan]
+        self.assertNotIn("volatile", phases)
+        self.assertLess(phases.index("contain"), phases.index("evidence"))
+        text = " ".join(c for s in plan for c in s["commands"])
+        self.assertIn("update-access-key", text)
+        self.assertIn("lookup-events", text)
+        self.assertTrue(all(s["approval"] for s in plan if s["phase"] == "contain"))
+
+    def test_ransomware_checks_hypervisors_other_types_do_not(self):
+        titles = [s["title"] for s in tp.build_plan("ransomware", "linux")]
+        self.assertIn("Hypervisors, NAS and backup consoles", titles)
+        self.assertNotIn("Hypervisors, NAS and backup consoles", [s["title"] for s in tp.build_plan("malware", "linux")])
+
+    def test_report_has_csf_and_attack_fields(self):
+        text = tp.report_skeleton("cloud-compromise", "linux")
+        self.assertIn("CSF 2.0 Function", text)
+        self.assertIn("Initial access (ATT&CK technique ID)", text)
+
+
 if __name__ == "__main__":
     unittest.main()

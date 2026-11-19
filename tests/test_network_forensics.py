@@ -49,6 +49,38 @@ def client_hello(sni):
     hs = b"\x01" + struct.pack(">I", len(body))[1:] + body
     return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
 
+def full_client_hello(sni="www.example.test", alpn=(b"h2", b"http/1.1"), grease=True):
+    """ClientHello with the cipher and extension set of the JA4 spec example."""
+    ciphers = [0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014,
+               0x009c, 0x009d, 0x002f, 0x0035]
+    if grease:
+        ciphers = [0x0a0a] + ciphers
+    def ext(t, body=b""):
+        return struct.pack(">HH", t, len(body)) + body
+    exts = ext(0x2a2a) if grease else b""
+    if sni is not None:
+        name = sni.encode()
+        exts += ext(0, struct.pack(">HBH", len(name) + 3, 0, len(name)) + name)
+    for t in (0x0017, 0xff01, 0x000a, 0x000b, 0x0023):
+        exts += ext(t)
+    if alpn:
+        lst = b"".join(bytes([len(a)]) + a for a in alpn)
+        exts += ext(0x0010, struct.pack(">H", len(lst)) + lst)
+    exts += ext(0x0005)
+    sigs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601]
+    exts += ext(0x000d, struct.pack(">H", 2 * len(sigs)) + b"".join(struct.pack(">H", x) for x in sigs))
+    for t in (0x0012, 0x0033, 0x002d):
+        exts += ext(t)
+    exts += ext(0x002b, bytes([6]) + struct.pack(">HHH", 0x3a3a, 0x0304, 0x0303))
+    for t in (0x001b, 0x4469, 0x0015):
+        exts += ext(t)
+    cs = b"".join(struct.pack(">H", c) for c in ciphers)
+    body = b"\x03\x03" + b"\x11" * 32 + b"\x00" + struct.pack(">H", len(cs)) + cs + b"\x01\x00" + \
+        struct.pack(">H", len(exts)) + exts
+    hs = b"\x01" + struct.pack(">I", len(body))[1:] + body
+    return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+
+
 def pcap(packets, linktype=1):
     out = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, linktype)
     for ts, frame in packets:
@@ -177,6 +209,59 @@ class PcapFindingTests(unittest.TestCase):
         self.assertTrue({"NET-001", "NET-010", "NET-020", "NET-021", "NET-040"} <= ids(r["findings"]))
 
 
+class Ja4Tests(unittest.TestCase):
+    def test_spec_example(self):
+        hello = pcapsum.parse_client_hello(full_client_hello())
+        self.assertEqual(hello["sni"], "www.example.test")
+        self.assertEqual(hello["alpn"][0], b"h2")
+        self.assertEqual(pcapsum.ja4(hello), "t13d1516h2_8daaf6152771_e5627efa2ab1")
+
+    def test_grease_is_ignored(self):
+        a = pcapsum.ja4(pcapsum.parse_client_hello(full_client_hello(grease=True)))
+        b = pcapsum.ja4(pcapsum.parse_client_hello(full_client_hello(grease=False)))
+        self.assertEqual(a, b)
+
+    def test_no_sni_no_alpn(self):
+        fp = pcapsum.ja4(pcapsum.parse_client_hello(full_client_hello(sni=None, alpn=())))
+        self.assertTrue(fp.startswith("t13i151400_8daaf6152771_"), fp)
+
+    def test_non_alnum_alpn_uses_hex(self):
+        fp = pcapsum.ja4(pcapsum.parse_client_hello(full_client_hello(alpn=(b"\xab\xcd",))))
+        self.assertEqual(fp.split("_")[0][-2:], "ad")
+
+    def test_minimal_hello_and_not_tls(self):
+        hello = pcapsum.parse_client_hello(client_hello("a.example.test"))
+        self.assertEqual(pcapsum.ja4(hello), "t12d010100_" + pcapsum._sha12("1301") + "_000000000000")
+        self.assertIsNone(pcapsum.parse_client_hello(b"GET / HTTP/1.1\r\n" + b"x" * 40))
+
+    def test_summary_lists_ja4(self):
+        pk = [(T0, eth(ipv4("192.0.2.10", "203.0.113.80", 6, tcp(49300, 443, full_client_hello()))))]
+        r = pcapsum.summarize(pcap(pk))
+        self.assertEqual(r["tls_ja4"][0]["ja4"], "t13d1516h2_8daaf6152771_e5627efa2ab1")
+        self.assertEqual(r["tls_ja4"][0]["alpn"], ["h2"])
+        self.assertEqual(r["findings"], [])
+
+
+class EncryptedDnsAndSniTests(unittest.TestCase):
+    def test_doh_sni_flagged(self):
+        pk = [(T0, eth(ipv4("192.0.2.10", "203.0.113.9", 6, tcp(49301, 443, full_client_hello("dns.google")))))]
+        self.assertIn("NET-041", ids(pcapsum.summarize(pcap(pk))["findings"]))
+
+    def test_dot_port_flagged_only_to_public(self):
+        pk = [(T0, eth(ipv4("192.168.1.10", "9.9.9.9", 6, tcp(49302, 853, b"", flags=0x02))))]
+        self.assertIn("NET-041", ids(pcapsum.summarize(pcap(pk))["findings"]))
+        pk = [(T0, eth(ipv4("192.168.1.10", "192.168.1.1", 6, tcp(49302, 853, b"", flags=0x02))))]
+        self.assertNotIn("NET-041", ids(pcapsum.summarize(pcap(pk))["findings"]))
+
+    def test_no_sni_to_public_ip(self):
+        pk = [(T0, eth(ipv4("192.168.1.10", "198.51.100.7", 6, tcp(49303, 443, full_client_hello(sni=None)))))]
+        r = pcapsum.summarize(pcap(pk))
+        self.assertIn("NET-042", ids(r["findings"]))
+        self.assertEqual(r["tls_no_sni"][0]["dst"], "198.51.100.7")
+        pk = [(T0, eth(ipv4("192.168.1.10", "192.168.1.20", 6, tcp(49303, 443, full_client_hello(sni=None)))))]
+        self.assertNotIn("NET-042", ids(pcapsum.summarize(pcap(pk))["findings"]))
+
+
 class PcapCliTests(unittest.TestCase):
     def test_json_shape_and_exit_codes(self):
         code, out, _ = call_main(pcapsum, [str(EX / "sample.pcap"), "--json"])
@@ -292,6 +377,93 @@ class BeaconTests(unittest.TestCase):
         p = run_cli("network-forensics", "beacon_detect", str(EX / "conns.csv"))
         self.assertEqual(p.returncode, 1)
         self.assertIn("BCN-001", p.stdout)
+
+
+def eve_lines(n, gap=120.0, extra_events=True):
+    out = []
+    for i in range(n):
+        start = T0 + i * gap
+        flow = {"timestamp": f"2026-03-04T09:00:{i % 60:02d}.000000+0000", "event_type": "flow",
+                "src_ip": "192.0.2.30", "src_port": 50000 + i, "dest_ip": "198.51.100.44", "dest_port": 443,
+                "proto": "TCP", "flow": {"start": start, "end": start + 2, "age": 2, "bytes_toserver": 640,
+                                         "bytes_toclient": 1200}}
+        out.append(json.dumps(flow))
+        if extra_events:
+            out.append(json.dumps({"timestamp": start, "event_type": "tls", "src_ip": "192.0.2.30",
+                                   "dest_ip": "198.51.100.44", "dest_port": 443, "tls": {"sni": "c2.example.test"}}))
+    return "\n".join(out) + "\n"
+
+
+class BeaconInputTests(unittest.TestCase):
+    def test_suricata_eve_flows_only(self):
+        recs, skipped, fmt = beacon.load_records(eve_lines(30))
+        self.assertEqual(fmt, "jsonl")
+        self.assertEqual(recs[0]["bytes"], 640)
+        self.assertEqual(recs[0]["duration"], 2)
+        r = beacon.detect(recs)
+        self.assertEqual(r["other_events_skipped"], 30)
+        self.assertEqual(r["candidates"][0]["connections"], 30)
+        self.assertIn("BCN-001", ids(r["findings"]))
+
+    def test_eve_without_flow_events_keeps_all(self):
+        recs, _, _ = beacon.load_records(json.dumps({"timestamp": T0, "event_type": "alert", "src_ip": "192.0.2.1",
+                                                     "dest_ip": "192.0.2.2", "dest_port": 80}))
+        self.assertEqual(beacon.detect(recs)["other_events_skipped"], 0)
+
+    def test_flatten_dns_v3(self):
+        row = {"dns": {"queries": [{"rrname": "A.Example.Test.", "rrtype": "A"}]}, "src_ip": "192.0.2.5",
+               "dest_ip": "192.0.2.53", "timestamp": T0}
+        recs, _ = beacon.normalize([row])
+        self.assertEqual(recs[0]["name"], "a.example.test")
+
+
+class LongConnectionTests(unittest.TestCase):
+    def rows(self, duration):
+        recs = [{"ts": T0 + i * 977.0, "src": "192.0.2.10", "dst": "198.51.100.%d" % i, "dport": 443,
+                 "bytes": 100, "duration": 5.0} for i in range(10)]
+        recs.append({"ts": T0, "src": "192.0.2.11", "dst": "203.0.113.9", "dport": 8443, "bytes": 900,
+                     "duration": duration})
+        return recs
+
+    def test_long_connection_flagged(self):
+        r = beacon.detect(self.rows(5 * 3600.0))
+        f = [x for x in r["findings"] if x["id"] == "BCN-002"]
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0]["severity"], "low")
+        self.assertEqual(r["long_connections"][0]["dst"], "203.0.113.9")
+        r = beacon.detect(self.rows(10 * 3600.0))
+        self.assertEqual([x for x in r["findings"] if x["id"] == "BCN-002"][0]["severity"], "medium")
+
+    def test_short_or_allowed_is_quiet(self):
+        self.assertNotIn("BCN-002", ids(beacon.detect(self.rows(1800.0))["findings"]))
+        allow = beacon.parse_allow(["203.0.113.0/24"])
+        self.assertNotIn("BCN-002", ids(beacon.detect(self.rows(9 * 3600.0), allow=allow)["findings"]))
+        self.assertNotIn("BCN-002", ids(beacon.detect(self.rows(9 * 3600.0), long_conn=0)["findings"]))
+
+    def test_cli_long_conn_flag(self):
+        lines = "\n".join(json.dumps({"ts": T0 + i, "src": "192.0.2.11", "dst": "203.0.113.9", "dport": 22,
+                                       "duration": 7200 if i == 0 else 3}) for i in range(3))
+        code, out, _ = call_main(beacon, ["-", "--json", "--fail-on", "low"], stdin=lines)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["long_connections"][0]["longest_s"], 7200)
+        code, _, _ = call_main(beacon, ["-", "--long-conn", "10000", "--fail-on", "low"], stdin=lines)
+        self.assertEqual(code, 0)
+
+
+class ByNameTests(unittest.TestCase):
+    def test_rotating_ips_found_by_name(self):
+        recs = [{"ts": T0 + i * 300.0, "src": "192.0.2.10", "dst": "198.51.100.%d" % (i % 7), "dport": 443,
+                 "bytes": 512, "name": "cdn-c2.example.test"} for i in range(30)]
+        self.assertEqual(beacon.detect(recs)["findings"], [])
+        r = beacon.detect(recs, by_name=True)
+        self.assertEqual(r["grouped_by"], "name")
+        self.assertIn("BCN-001", ids(r["findings"]))
+        self.assertIn("cdn-c2.example.test", r["findings"][0]["title"])
+
+    def test_by_name_needs_names(self):
+        recs = [{"ts": T0 + i, "src": "192.0.2.10", "dst": "198.51.100.1", "dport": 443, "bytes": 1} for i in range(8)]
+        with self.assertRaises(beacon.InputError):
+            beacon.detect(recs, by_name=True)
 
 
 if __name__ == "__main__":

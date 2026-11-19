@@ -28,11 +28,17 @@ Based on publicly documented research (Rhino Security Labs' IAM escalation metho
 | Glue | `iam:PassRole` + `glue:CreateDevEndpoint` |
 | CloudFormation | `iam:PassRole` + `cloudformation:CreateStack` |
 | Data Pipeline | `iam:PassRole` + `datapipeline:CreatePipeline` + `datapipeline:PutPipelineDefinition` |
+| ECS | `iam:PassRole` + `ecs:RegisterTaskDefinition` + `ecs:RunTask` (task role credentials from the container metadata endpoint) |
+| CodeBuild | `iam:PassRole` + `codebuild:CreateProject` + `codebuild:StartBuild` (the buildspec runs as the service role) |
+| SageMaker | `iam:PassRole` + `sagemaker:CreateNotebookInstance` + `sagemaker:CreatePresignedNotebookInstanceUrl` |
 
 Same idea without PassRole, by hijacking something that already runs as a privileged role:
 
 - `lambda:UpdateFunctionCode` on a function whose execution role is privileged
 - `glue:UpdateDevEndpoint` to add an SSH key to an existing endpoint
+- `lambda:UpdateFunctionConfiguration` to attach a layer or change the handler of a privileged function
+- `ssm:SendCommand` or `ssm:StartSession` on managed instances: commands run as root on the box, which can read the instance profile credentials. Scope with `ssm:resourceTag` conditions or explicit instance ARNs
+- `ec2-instance-connect:SendSSHPublicKey`: pushes a key valid for 60 seconds, then SSH in and use the instance role
 
 Safe PassRole pattern:
 

@@ -1,8 +1,9 @@
 ; dig-style TXT answers saved for weak.example.test (fake domain, fake records)
-weak.example.test.                 300 IN TXT "v=spf1 include:_spf.weak.example.test include:mailer.example.test ptr ?all"
+weak.example.test.                 300 IN TXT "v=spf1 include:_spf.weak.example.test include:mailer.example.test ip4:198.0.0.0/12 ptr ?all"
 _spf.weak.example.test.            300 IN TXT "v=spf1 a mx include:_spf2.weak.example.test ip4:192.0.2.0/24 ~all"
 _spf2.weak.example.test.           300 IN TXT "v=spf1 a:a1.example.test a:a2.example.test a:a3.example.test mx:mx.example.test exists:%{i}.spf.example.test -all"
 mailer.example.test.               300 IN TXT "v=spf1 ip4:198.51.100.0/24 -all"
 _dmarc.weak.example.test.          300 IN TXT "v=DMARC1; p=quarantine; sp=none; pct=50"
 mail2019._domainkey.weak.example.test. 300 IN TXT "v=DKIM1; t=y; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC7wtWyVMxs2xR7WLZiZdlMel1+Qc8agj7WEK3pUEmOkfAt0a/OYvYY1Wq7VOi545SRFUOWRrAuBcN5JhFeEIS6cskLaFekMKlQatfmgldLNArp6HSMiRTTosZPCbZFED4+yuqKreYXQ59yaFH9Yw9CUQRf/OvAQ46R6/ym2fRGSwIDAQAB"
 _mta-sts.weak.example.test.        300 IN TXT "v=STSv1; id=2024-01-01"
+default._bimi.weak.example.test.   300 IN TXT "v=BIMI1; l=http://weak.example.test/logo.png"

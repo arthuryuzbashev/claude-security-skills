@@ -2,11 +2,13 @@
 """Check a TLS endpoint or a certificate file: protocol, cipher, certificate health.
 
 Live mode makes a few TLS handshakes to one host:port (no HTTP request, nothing else).
+One of them is a plain TLS 1.3 ClientHello that offers the X25519MLKEM768 hybrid group,
+read only up to the ServerHello, to see which key exchange group the server picks.
 File mode parses a PEM or DER certificate with a small built-in ASN.1 reader, fully offline.
 
 Usage:
   tls_check.py app.example.test
-  tls_check.py app.example.test:8443 --timeout 5
+  tls_check.py app.example.test:8443 --timeout 5 --no-pq
   tls_check.py --cert server.pem --hostname www.example.test
   tls_check.py --cert server.pem --now 2027-06-01 --json --fail-on medium
 """
@@ -16,6 +18,7 @@ import argparse
 import base64
 import datetime as dt
 import ipaddress
+import os
 import json
 import re
 import socket
@@ -393,6 +396,13 @@ def grade_connection(conn: Dict[str, Any]) -> List[Dict[str, str]]:
             out.append(finding("TLS-081", "low", f"CBC-mode cipher negotiated: {cipher}",
                                "CBC suites in TLS 1.2 have a long history of padding-oracle bugs.",
                                "Order AEAD suites first on the server."))
+    if conn.get("pq_hybrid") is False:
+        group = conn.get("key_exchange_group") or "a classical group"
+        out.append(finding("TLS-090", "info", "No post-quantum hybrid key exchange",
+                           f"Offered X25519MLKEM768 with a key share and the server picked {group}. Recorded traffic "
+                           "could be decrypted later by a large quantum computer (harvest now, decrypt later).",
+                           "Enable X25519MLKEM768 first in the group list (OpenSSL 3.5+, BoringSSL, Go 1.24+, "
+                           "nginx ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1:secp384r1)."))
     err = conn.get("verify_error")
     if err and "hostname" not in err.lower():
         out.append(finding("TLS-032", "high", "Certificate chain does not verify",
@@ -463,6 +473,131 @@ def connect(host: str, port: int, timeout: float, sni: Optional[str]) -> Tuple[D
     return conn, der or b""
 
 
+# ---------------------------------------------------------------- post-quantum group probe
+
+# IANA TLS Supported Groups; hybrids from RFC 10024 / draft-ietf-tls-ecdhe-mlkem.
+GROUP_NAMES = {
+    0x0017: "secp256r1", 0x0018: "secp384r1", 0x0019: "secp521r1", 0x001D: "x25519", 0x001E: "x448",
+    0x0100: "ffdhe2048", 0x0101: "ffdhe3072", 0x0102: "ffdhe4096",
+    0x0200: "MLKEM512", 0x0201: "MLKEM768", 0x0202: "MLKEM1024",
+    0x11EB: "SecP256r1MLKEM768", 0x11EC: "X25519MLKEM768", 0x11ED: "SecP384r1MLKEM1024",
+}
+PQ_GROUPS = {0x0200, 0x0201, 0x0202, 0x11EB, 0x11EC, 0x11ED}
+OFFERED_GROUPS = [0x11EC, 0x001D, 0x11EB, 0x0017, 0x0018]   # key shares sent for the first two only
+SIG_SCHEMES = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0807]
+HRR_RANDOM = bytes.fromhex("CF21AD74E59A6111BE1D8C021E65B891C2A211167ABB8C5E079E09E2C8A8339C")
+MLKEM768_EK_LEN = 1184
+
+
+def _u16(n: int) -> bytes:
+    return n.to_bytes(2, "big")
+
+
+def _ext(ext_type: int, body: bytes) -> bytes:
+    return _u16(ext_type) + _u16(len(body)) + body
+
+
+def build_pq_client_hello(sni: Optional[str], rand=os.urandom) -> bytes:
+    """A TLS 1.3-only ClientHello record offering X25519MLKEM768 (with a share) and X25519.
+
+    The ML-KEM-768 encapsulation key is all-zero coefficients plus a random seed: well formed
+    (it passes the FIPS 203 modulus check) and we never finish the handshake, so it has no secret.
+    """
+    exts = b""
+    if sni:
+        name = sni.encode("idna")
+        entry = b"\x00" + _u16(len(name)) + name
+        exts += _ext(0x0000, _u16(len(entry)) + entry)
+    groups = b"".join(_u16(g) for g in OFFERED_GROUPS)
+    exts += _ext(0x000A, _u16(len(groups)) + groups)
+    sigs = b"".join(_u16(x) for x in SIG_SCHEMES)
+    exts += _ext(0x000D, _u16(len(sigs)) + sigs)
+    exts += _ext(0x002B, b"\x02\x03\x04")          # supported_versions: TLS 1.3 only
+    exts += _ext(0x002D, b"\x01\x01")               # psk_key_exchange_modes: psk_dhe_ke
+    hybrid = bytes(MLKEM768_EK_LEN - 32) + rand(32) + rand(32)   # ML-KEM-768 ek || X25519 share
+    shares = _u16(0x11EC) + _u16(len(hybrid)) + hybrid + _u16(0x001D) + _u16(32) + rand(32)
+    exts += _ext(0x0033, _u16(len(shares)) + shares)
+    suites = b"\x13\x01\x13\x02\x13\x03"
+    body = (b"\x03\x03" + rand(32) + b"\x20" + rand(32) + _u16(len(suites)) + suites
+            + b"\x01\x00" + _u16(len(exts)) + exts)
+    hs = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + _u16(len(hs)) + hs
+
+
+def parse_server_hello(data: bytes) -> Dict[str, Any]:
+    """Read the first handshake message from raw records. Returns {status, group, hrr, version}."""
+    hs = b""
+    pos = 0
+    while pos + 5 <= len(data):
+        ctype, length = data[pos], int.from_bytes(data[pos + 3:pos + 5], "big")
+        frag = data[pos + 5:pos + 5 + length]
+        if len(frag) < length:
+            break
+        pos += 5 + length
+        if ctype == 21:
+            desc = frag[1] if len(frag) > 1 else -1
+            return {"status": "alert", "alert": desc}
+        if ctype == 22:
+            hs += frag
+            if len(hs) >= 4 and len(hs) >= 4 + int.from_bytes(hs[1:4], "big"):
+                break
+    if len(hs) < 4 or hs[0] != 2 or len(hs) < 4 + int.from_bytes(hs[1:4], "big"):
+        return {"status": "incomplete"}
+    body = hs[4:4 + int.from_bytes(hs[1:4], "big")]
+    try:
+        random = body[2:34]
+        sid_len = body[34]
+        p = 35 + sid_len + 3            # session id, cipher suite, compression
+        ext_end = p + 2 + int.from_bytes(body[p:p + 2], "big")
+        p += 2
+        version, group = None, None
+        while p + 4 <= ext_end:
+            etype, elen = int.from_bytes(body[p:p + 2], "big"), int.from_bytes(body[p + 2:p + 4], "big")
+            edata = body[p + 4:p + 4 + elen]
+            if etype == 0x002B and elen >= 2:
+                version = int.from_bytes(edata[:2], "big")
+            elif etype == 0x0033 and elen >= 2:
+                group = int.from_bytes(edata[:2], "big")
+            p += 4 + elen
+    except IndexError:
+        return {"status": "incomplete"}
+    return {"status": "ok", "hrr": random == HRR_RANDOM, "version": version, "group": group}
+
+
+def probe_pq(host: str, port: int, timeout: float, sni: Optional[str]) -> Dict[str, Any]:
+    """Send one TLS 1.3 ClientHello, read up to the ServerHello, close. No keys are derived."""
+    try:
+        ipaddress.ip_address(sni or "")
+        sni = None                      # no SNI for IP literals
+    except ValueError:
+        pass
+    data = b""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.sendall(build_pq_client_hello(sni))
+            while len(data) < 65536:
+                chunk = sock.recv(16384)
+                if not chunk:
+                    break
+                data += chunk
+                res = parse_server_hello(data)
+                if res["status"] != "incomplete":
+                    break
+    except OSError as err:
+        if not data:
+            return {"key_exchange_group": None, "pq_hybrid": None, "pq_note": f"probe failed: {err}"}
+    res = parse_server_hello(data)
+    if res["status"] == "alert":
+        return {"key_exchange_group": None, "pq_hybrid": None,
+                "pq_note": f"server sent alert {res['alert']} to a TLS 1.3-only hello"}
+    if res["status"] != "ok" or res.get("version") != 0x0304 or res.get("group") is None:
+        return {"key_exchange_group": None, "pq_hybrid": None, "pq_note": "no TLS 1.3 key share in the reply"}
+    gid = res["group"]
+    name = GROUP_NAMES.get(gid, f"0x{gid:04x}")
+    return {"key_exchange_group": name, "pq_hybrid": gid in PQ_GROUPS,
+            "pq_note": "picked after HelloRetryRequest" if res["hrr"] else "picked from our key share"}
+
+
 def split_target(target: str, default_port: int) -> Tuple[str, int]:
     target = re.sub(r"^[a-z]+://", "", target.strip(), flags=re.I).split("/", 1)[0]
     if target.startswith("["):  # [IPv6]:port
@@ -488,6 +623,8 @@ def render_text(target, conn, cert, findings, now) -> str:
     lines = [f"TLS check: {target}"]
     if conn:
         lines.append(f"Protocol {conn['protocol']}, cipher {conn['cipher']} ({conn['cipher_bits']} bits)")
+        if "pq_hybrid" in conn:
+            lines.append(f"  key exchange: {conn['key_exchange_group'] or 'unknown'} ({conn['pq_note']})")
         for ver, (status, note) in conn.get("legacy_notes", {}).items():
             lines.append(f"  {ver}: {status}" + (f" ({note})" if status in ("could not test", "error") else ""))
     if cert:
@@ -521,6 +658,7 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=443, help="port when the target has none (default 443)")
     ap.add_argument("--hostname", help="name to match against the cert (live default: the target host)")
     ap.add_argument("--no-legacy", action="store_true", help="live: skip the TLS 1.0/1.1 probes")
+    ap.add_argument("--no-pq", action="store_true", help="live: skip the post-quantum key exchange probe")
     ap.add_argument("--now", help="grade expiry as of YYYY-MM-DD (default: today)")
     ap.add_argument("--timeout", type=float, default=8.0)
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -544,6 +682,9 @@ def main(argv=None) -> int:
             if not args.no_legacy:
                 for ver in ("TLSv1", "TLSv1.1"):
                     notes[ver] = probe_protocol(host, port, ver, args.timeout, sni)
+            # the probe speaks raw TLS 1.3 itself, so it also runs when the local ssl module cannot
+            if not args.no_pq and (conn.get("protocol") == "TLSv1.3" or not conn.get("client_tls13")):
+                conn.update(probe_pq(host, port, args.timeout, sni))
             conn["legacy"] = {k: v[0] for k, v in notes.items()}
             conn["legacy_notes"] = notes
             ders = [der] if der else []

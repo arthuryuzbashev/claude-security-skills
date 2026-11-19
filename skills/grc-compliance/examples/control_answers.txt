@@ -36,3 +36,6 @@ incident_reporting: yes
 management_oversight: partial
 endpoint_devices: yes
 legal_privacy: yes
+incident_notification: partial   GDPR process exists, NIS2 clocks not written down
+vuln_disclosure: no
+software_supply_chain: partial   dependency alerts on, no SBOM yet

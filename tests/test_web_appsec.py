@@ -59,6 +59,50 @@ class HeaderAuditTests(unittest.TestCase):
     def test_help_subprocess(self):
         self.assertEqual(run_cli("web-appsec", "header_audit", "--help").returncode, 0)
 
+    def test_hsts_without_subdomains(self):
+        self.assertIn("HDR-003", ids(headers.check_hsts({"strict-transport-security": ["max-age=63072000"]}, True)))
+        self.assertEqual(headers.check_hsts({"strict-transport-security": ["max-age=63072000; includeSubDomains"]}, True), [])
+
+    def test_strict_dynamic_is_not_a_wildcard(self):
+        strict = {"content-security-policy": ["script-src 'nonce-abc' 'strict-dynamic' https: 'unsafe-inline'; object-src 'none'; base-uri 'none'"]}
+        self.assertEqual(headers.check_csp(strict), [])
+        loose = {"content-security-policy": ["script-src 'self' 'strict-dynamic' https:; object-src 'none'"]}
+        self.assertIn("HDR-014", ids(headers.check_csp(loose)), "strict-dynamic without a nonce does not neutralize https:")
+
+    def test_nonce_policy_needs_base_uri(self):
+        h = {"content-security-policy": ["script-src 'nonce-abc'; object-src 'none'"]}
+        self.assertIn("HDR-017", ids(headers.check_csp(h)))
+        h = {"content-security-policy": ["default-src 'self'; object-src 'none'"]}
+        self.assertNotIn("HDR-017", ids(headers.check_csp(h)), "host-based policies do not need it")
+
+    def test_xss_protection_header(self):
+        self.assertIn("HDR-033", ids(headers.check_simple({"x-xss-protection": ["1; mode=block"]})))
+        self.assertNotIn("HDR-033", ids(headers.check_simple({"x-xss-protection": ["0"]})))
+
+    def test_coop_only_on_html(self):
+        self.assertIn("HDR-034", ids(headers.check_simple({"content-type": ["text/html"]})))
+        self.assertNotIn("HDR-034", ids(headers.check_simple({"content-type": ["application/json"]})))
+        self.assertNotIn("HDR-034", ids(headers.check_simple({"content-type": ["text/html"], "cross-origin-opener-policy": ["same-origin"]})))
+
+    def test_null_origin(self):
+        f = headers.check_simple({"access-control-allow-origin": ["null"], "access-control-allow-credentials": ["true"]})
+        self.assertEqual([x["severity"] for x in f if x["id"] == "HDR-042"], ["high"])
+        f = headers.check_simple({"access-control-allow-origin": ["https://app.example.test"]})
+        self.assertNotIn("HDR-042", ids(f))
+
+    def test_source_map_and_extra_version_headers(self):
+        found = ids(headers.check_simple({"sourcemap": ["/static/app.js.map"], "x-generator": ["Drupal 10"]}))
+        self.assertTrue({"HDR-052", "HDR-050"} <= found)
+        self.assertFalse({"HDR-052", "HDR-050"} & ids(headers.check_simple({"server": ["nginx"]})))
+
+    def test_cookie_prefix_rules(self):
+        bad = headers.check_cookies({"set-cookie": ["__Host-sid=1; Path=/app; Domain=example.test; Secure; HttpOnly; SameSite=Lax"]}, True)
+        self.assertIn("CK-003", ids(bad))
+        bad = headers.check_cookies({"set-cookie": ["__Secure-id=1; Path=/; HttpOnly; SameSite=Lax"]}, False)
+        self.assertIn("CK-003", ids(bad))
+        good = headers.check_cookies({"set-cookie": ["__Host-sid=1; Path=/; Secure; HttpOnly; SameSite=Lax"]}, True)
+        self.assertEqual(good, [])
+
 
 class JwtInspectTests(unittest.TestCase):
     def test_unsigned_example(self):
@@ -82,6 +126,15 @@ class JwtInspectTests(unittest.TestCase):
         t = make_jwt({"alg": "RS256", "jku": "https://evil.test/k", "kid": "../../dev/null"}, {"exp": 2, "iss": "a", "aud": "b"})
         found = ids(jwt.analyze(*jwt.decode(t), now=1))
         self.assertTrue({"JWT-003", "JWT-005"} <= found)
+
+    def test_x5c_header(self):
+        t = make_jwt({"alg": "RS256", "x5c": ["MIIfake"]}, {"exp": 2, "iss": "a", "aud": "b"})
+        self.assertIn("JWT-006", ids(jwt.analyze(*jwt.decode(t), now=1)))
+
+    def test_future_iat(self):
+        t = make_jwt({"alg": "RS256"}, {"iss": "a", "aud": "b", "iat": 5000, "exp": 6000})
+        self.assertIn("JWT-014", ids(jwt.analyze(*jwt.decode(t), now=1000)))
+        self.assertNotIn("JWT-014", ids(jwt.analyze(*jwt.decode(t), now=4900)), "inside the 5 minute skew")
 
     def test_bad_input(self):
         code, _, err = call_main(jwt, ["not-a-token"])

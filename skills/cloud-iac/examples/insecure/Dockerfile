@@ -12,5 +12,6 @@ ENV NODE_ENV=production \
 ARG DB_PASSWORD=hunter2-not-real
 ADD https://downloads.example.test/agent.tar.gz /opt/agent.tar.gz
 RUN curl -fsSL https://get.example.test/install.sh | sh
+RUN pip install --trusted-host pypi.example.test example-agent==1.2.0
 COPY --from=build /src/dist /app
 CMD ["node", "/app/server.js"]

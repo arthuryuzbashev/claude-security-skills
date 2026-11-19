@@ -146,6 +146,151 @@ class TestLintChecks(unittest.TestCase):
         self.assertIn("SIG-003", [f["id"] for r in res["rules"] for f in r["findings"]])
 
 
+CORR = """
+title: Brute force burst
+id: 2f1a6e0c-0b7d-4c55-9a2e-6d3f00000002
+status: test
+level: high
+description: Ten or more failed logons per source in ten minutes.
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - IpAddress
+  timespan: 10m
+  condition:
+    gte: 10
+falsepositives:
+  - Misconfigured service accounts
+tags:
+  - attack.credential-access
+  - attack.t1110.001
+date: 2026-11-19
+"""
+
+FILTER = """
+title: Filter admin accounts
+id: 2f1a6e0c-0b7d-4c55-9a2e-6d3f00000004
+logsource:
+  category: process_creation
+  product: windows
+filter:
+  rules:
+    - 0b6c2f2e-6a59-4c1e-9d4f-2f1c7b0a9e11
+  selection:
+    User|startswith: 'adm_'
+  condition: selection
+date: 2026-11-19
+description: test
+"""
+
+
+class TestAttackTagsV20(unittest.TestCase):
+    def test_new_tactic_tags_accepted(self):
+        text = with_line(GOOD, "  - attack.execution\n", "  - attack.execution\n  - attack.stealth\n  - attack.defense-impairment\n  - attack.t1685\n")
+        self.assertEqual(lint(text), [])
+
+    def test_legacy_defense_evasion(self):
+        got = [f for f in sl.lint_rule(sl.load_yaml_docs(with_line(GOOD, "attack.execution", "attack.defense-evasion"))[0]) if f["id"] == "SIG-033"]
+        self.assertEqual(got[0]["severity"], "low")
+        self.assertNotIn("SIG-030", lint(with_line(GOOD, "attack.execution", "attack.defense-evasion")))
+
+    def test_revoked_technique(self):
+        f = [x for x in sl.lint_rule(sl.load_yaml_docs(with_line(GOOD, "attack.t1059.001", "attack.t1562.001"))[0]) if x["id"] == "SIG-034"]
+        self.assertEqual(f[0]["severity"], "medium")
+        self.assertIn("T1685", f[0]["detail"])
+        self.assertIn("attack.t1685", f[0]["fix"])
+
+    def test_deprecated_and_unknown_technique(self):
+        self.assertIn("SIG-034", lint(with_line(GOOD, "attack.t1059.001", "attack.t1053.004")))
+        self.assertIn("SIG-035", lint(with_line(GOOD, "attack.t1059.001", "attack.t1999")))
+        self.assertNotIn("SIG-035", lint(with_line(GOOD, "attack.t1059.001", "attack.t1621")))
+
+
+class TestModifierValues(unittest.TestCase):
+    def sel(self, line):
+        return lint(with_line(GOOD, "    Image|endswith: '\\powershell.exe'\n", line + "\n"))
+
+    def test_good_values_clean(self):
+        for line in ("    CommandLine|windash|contains: '-enc'", "    DestinationIp|cidr: '10.0.0.0/8'",
+                     "    Port|gte: 1024", "    EventTime|hour: 23", "    User|exists: true",
+                     "    Image|re|i: 'power.*'", "    CommandLine|contains|all:\n      - 'a'\n      - 'b'"):
+            self.assertEqual(self.sel(line), [], line)
+
+    def test_all_single_value(self):
+        self.assertIn("SIG-072", self.sel("    CommandLine|contains|all: 'a'"))
+
+    def test_flag_without_re(self):
+        self.assertIn("SIG-073", self.sel("    Image|i: 'power'"))
+
+    def test_numeric_and_time(self):
+        self.assertIn("SIG-074", self.sel("    Port|gt: 'high'"))
+        self.assertIn("SIG-074", self.sel("    EventTime|minute: 60"))
+        self.assertNotIn("SIG-070", self.sel("    EventTime|minute: 30"))
+
+    def test_bad_cidr(self):
+        self.assertIn("SIG-075", self.sel("    DestinationIp|cidr: '10.0.0.0/33'"))
+
+    def test_exists_needs_bool(self):
+        self.assertIn("SIG-076", self.sel("    User|exists: 'yes'"))
+
+    def test_re_with_string_modifier(self):
+        self.assertIn("SIG-077", self.sel("    Image|re|contains: 'a.*b'"))
+
+    def test_related(self):
+        good = GOOD + "related:\n  - id: 0b6c2f2e-6a59-4c1e-9d4f-2f1c7b0a9e12\n    type: derived\n"
+        self.assertEqual(lint(good), [])
+        self.assertIn("SIG-013", lint(good.replace("type: derived", "type: copied")))
+
+
+class TestCorrelationAndFilter(unittest.TestCase):
+    def test_good_correlation_clean(self):
+        self.assertEqual(lint(CORR), [])
+
+    def test_correlation_type_rules_timespan(self):
+        self.assertIn("SIG-080", lint(with_line(CORR, "type: event_count", "type: count")))
+        self.assertIn("SIG-081", lint(with_line(CORR, "  rules:\n    - failed_logon\n", "")))
+        self.assertIn("SIG-082", lint(with_line(CORR, "timespan: 10m", "timespan: 1h30m")))
+        self.assertIn("SIG-082", lint(with_line(CORR, "  timespan: 10m\n", "")))
+
+    def test_correlation_condition(self):
+        self.assertIn("SIG-083", lint(with_line(CORR, "gte: 10", "above: 10")))
+        self.assertIn("SIG-083", lint(with_line(CORR, "gte: 10", "gte: ten")))
+        self.assertIn("SIG-083", lint(with_line(CORR, "  condition:\n    gte: 10\n", "")))
+        self.assertNotIn("SIG-083", lint(with_line(CORR, "gte: 10", "gt: 10\n    lte: 200")))
+
+    def test_value_count_needs_field(self):
+        vc = with_line(CORR, "type: event_count", "type: value_count")
+        self.assertIn("SIG-084", lint(vc))
+        self.assertNotIn("SIG-084", lint(with_line(vc, "gte: 10", "field: TargetUserName\n    gte: 10")))
+
+    def test_temporal(self):
+        t = with_line(with_line(CORR, "type: event_count", "type: temporal"), "  condition:\n    gte: 10\n", "")
+        self.assertIn("SIG-086", lint(t))
+        self.assertNotIn("SIG-083", lint(t))
+        self.assertNotIn("SIG-086", lint(with_line(t, "    - failed_logon\n", "    - failed_logon\n    - good_logon\n")))
+
+    def test_group_by_and_detection(self):
+        self.assertIn("SIG-085", lint(with_line(CORR, "  group-by:\n    - IpAddress\n", "")))
+        self.assertIn("SIG-087", lint(CORR + "detection:\n  sel:\n    A: 1\n  condition: sel\n"))
+
+    def test_filter_rule(self):
+        self.assertEqual(lint(FILTER), [])
+        self.assertIn("SIG-090", lint(with_line(FILTER, "  rules:\n    - 0b6c2f2e-6a59-4c1e-9d4f-2f1c7b0a9e11\n", "")))
+        self.assertIn("SIG-020", lint(with_line(FILTER, "condition: selection", "condition: sel")))
+
+    def test_reference_check_across_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, text in (("base.yml", GOOD), ("corr.yml", CORR), ("flt.yml", FILTER)):
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write(text)
+            res = sl.lint_paths([d])
+        by_file = {os.path.basename(r["file"]): [f["id"] for f in r["findings"]] for r in res["rules"]}
+        self.assertIn("SIG-088", by_file["corr.yml"])
+        self.assertNotIn("SIG-088", by_file["flt.yml"])
+
+
 class TestLintCli(unittest.TestCase):
     def test_example_rules_clean(self):
         code, out, _ = call_main(sl, [str(EX / "rules"), "--json"])
@@ -260,7 +405,38 @@ class TestMatching(unittest.TestCase):
         with self.assertRaises(dt.RuleError):
             rule("  sel:\n    A: 1\n  condition: sel and missing\n")
         with self.assertRaises(dt.RuleError):
-            hit(rule("  sel:\n    A|windash: '-x'\n  condition: sel\n"), {"A": "-x"})
+            hit(rule("  sel:\n    A|base64offset: 'x'\n  condition: sel\n"), {"A": "-x"})
+        with self.assertRaises(dt.RuleError):
+            hit(rule("  sel:\n    A|cidr: '10.0.0.0/33'\n  condition: sel\n"), {"A": "10.0.0.1"})
+        with self.assertRaises(dt.RuleError):
+            dt.compile_rule(sl.load_yaml_docs(CORR)[0])
+
+    def test_windash(self):
+        r = rule("  sel:\n    CommandLine|windash|contains: ' -enc '\n  condition: sel\n")
+        self.assertTrue(hit(r, {"CommandLine": "powershell -enc AAAA"}))
+        self.assertTrue(hit(r, {"CommandLine": "powershell /enc AAAA"}))
+        self.assertTrue(hit(r, {"CommandLine": "powershell \u2013enc AAAA"}))
+        self.assertFalse(hit(r, {"CommandLine": "powershell enc AAAA"}))
+
+    def test_cidr(self):
+        r = rule("  sel:\n    DestinationIp|cidr:\n      - '10.0.0.0/8'\n      - '2001:db8::/32'\n  condition: sel\n")
+        self.assertTrue(hit(r, {"DestinationIp": "10.20.30.40"}))
+        self.assertTrue(hit(r, {"DestinationIp": "2001:db8::5"}))
+        self.assertFalse(hit(r, {"DestinationIp": "192.0.2.10"}))
+        self.assertFalse(hit(r, {"DestinationIp": "not-an-ip"}))
+
+    def test_numeric_modifiers(self):
+        r = rule("  sel:\n    Port|gte: 1024\n    Bytes|lt: 500\n  condition: sel\n")
+        self.assertTrue(hit(r, {"Port": 1024, "Bytes": "499"}))
+        self.assertFalse(hit(r, {"Port": 80, "Bytes": 10}))
+        self.assertFalse(hit(r, {"Port": "high", "Bytes": 10}))
+
+    def test_neq(self):
+        r = rule("  sel:\n    User|neq:\n      - 'svc_backup'\n      - 'SYSTEM'\n  condition: sel\n")
+        self.assertTrue(hit(r, {"User": "alice"}))
+        self.assertFalse(hit(r, {"User": "svc_backup"}))
+        self.assertFalse(hit(r, {"User": "system"}))
+        self.assertFalse(hit(r, {"Other": "x"}))
 
 
 class TestDetectionCli(unittest.TestCase):

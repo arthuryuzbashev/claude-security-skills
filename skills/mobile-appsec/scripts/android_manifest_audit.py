@@ -6,7 +6,8 @@ out of an APK is refused: decode it first (apktool d app.apk, or aapt2 dump xmlt
 
 Usage:
   android_manifest_audit.py app/src/main/AndroidManifest.xml
-  android_manifest_audit.py decoded/AndroidManifest.xml --target-sdk 34 --json
+  android_manifest_audit.py decoded/AndroidManifest.xml --target-sdk 36 --json
+  android_manifest_audit.py wear/AndroidManifest.xml --required-target-sdk 35
   android_manifest_audit.py AndroidManifest.xml --nsc res/xml/network_security_config.xml
   cat AndroidManifest.xml | android_manifest_audit.py -
 """
@@ -48,6 +49,12 @@ SPECIAL = {
     "BIND_ACCESSIBILITY_SERVICE": "accessibility service can read and drive the whole UI",
     "BIND_DEVICE_ADMIN": "device admin can lock or wipe the device",
 }
+# Google Play target API level rules (verified 2026-11-19, support.google.com/googleplay/android-developer/answer/11926878):
+# since 2026-08-31 new apps and updates (phone, tablet) must target API 36; existing apps below API 35 stop being
+# discoverable to users on newer Android versions. Wear OS and Automotive need 35, Android TV 34.
+PLAY_REQUIRED_TARGET = 36
+PLAY_FLOOR_TARGET = 35
+
 COMPONENTS = {
     # tag: (id, severity when exported without permission)
     "provider": ("AND-020", "high"),
@@ -298,8 +305,55 @@ def audit_permissions(root: ET.Element) -> Tuple[List[Dict], Dict[str, str]]:
     return out, weak
 
 
+def audit_target_sdk(target_sdk: Optional[int], required: int = PLAY_REQUIRED_TARGET) -> List[Dict]:
+    if target_sdk is None or target_sdk >= required:
+        return []
+    floor = min(PLAY_FLOOR_TARGET, required - 1)
+    if target_sdk < floor:
+        return [finding("AND-051", "medium", f"targetSdk {target_sdk} is below Google Play's floor (API {floor})",
+                        f"Google Play rejects new apps and updates below API {required}, and existing apps below API "
+                        f"{floor} are hidden from users on newer Android versions. Old targets also keep legacy, "
+                        "weaker platform defaults (implicit exports, cleartext, storage and intent rules).",
+                        f"Raise targetSdkVersion to {required} and retest the behavior changes of each skipped level. "
+                        "Wear OS and Automotive need 35, Android TV 34; apps outside Play can judge this as hygiene.",
+                        "uses-sdk", "MASVS-CODE")]
+    return [finding("AND-051", "low", f"targetSdk {target_sdk}: new apps and updates need API {required} on Google Play",
+                    f"Since 2026-08-31 Google Play only accepts new apps and updates that target API {required}. The "
+                    "current build stays listed, but the next release must raise it.",
+                    f"Raise targetSdkVersion to {required} before the next release.", "uses-sdk", "MASVS-CODE")]
+
+
+def audit_tasks(root: ET.Element, app: ET.Element, min_sdk: Optional[int]) -> List[Dict]:
+    out = []
+    old = min_sdk is None or min_sdk < 30
+    where = []
+    if is_true(attr(app, "allowTaskReparenting")):
+        where.append("application")
+    for tag in ("activity", "activity-alias"):
+        for comp in app.findall(tag):
+            if is_true(attr(comp, "allowTaskReparenting")):
+                where.append(attr(comp, "name") or "(unnamed)")
+    if where:
+        out.append(finding("AND-052", "medium" if old else "low",
+                           "allowTaskReparenting=\"true\" (task hijacking surface)",
+                           "Activities can move into another task with the same affinity. This is the mechanism behind "
+                           "task hijacking (StrandHogg): another app can put its own screen on top of yours and phish "
+                           "for credentials." + (" Android 10 and lower (minSdk below 30) lack the OS fixes." if old else ""),
+                           "Remove allowTaskReparenting unless a feature needs it; raise minSdk to 30 where possible.",
+                           ", ".join(where), "MASVS-PLATFORM"))
+    shared = attr(root, "sharedUserId")
+    if shared and attr(root, "sharedUserMaxSdkVersion") is None:
+        out.append(finding("AND-053", "low", f"sharedUserId {shared} (deprecated)",
+                           "Apps signed with the same key share one Linux user ID, so they share private files and "
+                           "permissions: a bug in one app exposes the other. Deprecated since API 29.",
+                           "Move shared data to a signature-protected provider or service, then set "
+                           "android:sharedUserMaxSdkVersion=\"32\" so new installs (Android 13+) drop the shared UID.",
+                           "manifest", "MASVS-PLATFORM"))
+    return out
+
+
 def audit_manifest(root: ET.Element, nsc_root: Optional[ET.Element] = None, target_sdk: Optional[int] = None,
-                   min_sdk: Optional[int] = None) -> Dict[str, object]:
+                   min_sdk: Optional[int] = None, required_target: int = PLAY_REQUIRED_TARGET) -> Dict[str, object]:
     if root.tag != "manifest":
         raise AuditError("root element is not <manifest>; is this an AndroidManifest.xml?")
     sdk = root.find("uses-sdk")
@@ -364,6 +418,8 @@ def audit_manifest(root: ET.Element, nsc_root: Optional[ET.Element] = None, targ
     out += perm_findings
     out += audit_components(app, target_sdk, min_sdk, weak)
     out += audit_deep_links(app)
+    out += audit_target_sdk(target_sdk, required_target)
+    out += audit_tasks(root, app, min_sdk)
     if target_sdk is None:
         out.append(finding("AND-050", "info", "targetSdk unknown",
                            "No uses-sdk targetSdkVersion in the manifest (Gradle sets it). Defaults that depend on it "
@@ -376,7 +432,8 @@ def audit_manifest(root: ET.Element, nsc_root: Optional[ET.Element] = None, targ
 
 
 def audit_file(path: str, nsc_path: Optional[str] = None, target_sdk: Optional[int] = None,
-               min_sdk: Optional[int] = None, data: Optional[bytes] = None) -> Dict[str, object]:
+               min_sdk: Optional[int] = None, data: Optional[bytes] = None,
+               required_target: int = PLAY_REQUIRED_TARGET) -> Dict[str, object]:
     if data is None:
         try:
             with open(path, "rb") as fh:
@@ -398,7 +455,7 @@ def audit_file(path: str, nsc_path: Optional[str] = None, target_sdk: Optional[i
         if auto:
             with open(auto, "rb") as fh:
                 nsc_root = parse_xml(fh.read(), auto)
-    res = audit_manifest(root, nsc_root, target_sdk, min_sdk)
+    res = audit_manifest(root, nsc_root, target_sdk, min_sdk, required_target)
     res["manifest"] = path
     return res
 
@@ -423,6 +480,9 @@ def main(argv=None) -> int:
     ap.add_argument("--nsc", help="network security config XML (default: res/xml/<name>.xml next to the manifest)")
     ap.add_argument("--target-sdk", type=int, help="targetSdkVersion when the manifest does not carry it (Gradle)")
     ap.add_argument("--min-sdk", type=int, help="minSdkVersion when the manifest does not carry it")
+    ap.add_argument("--required-target-sdk", type=int, default=PLAY_REQUIRED_TARGET,
+                    help=f"targetSdk Google Play requires for new releases (default: {PLAY_REQUIRED_TARGET}, "
+                         "the phone and tablet rule since 2026-08-31; use 35 for Wear OS or Automotive, 34 for TV)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any finding is at or above this severity (default: high)")
@@ -430,7 +490,7 @@ def main(argv=None) -> int:
     try:
         data = sys.stdin.buffer.read() if args.manifest == "-" and hasattr(sys.stdin, "buffer") else (
             sys.stdin.read().encode() if args.manifest == "-" else None)
-        res = audit_file(args.manifest, args.nsc, args.target_sdk, args.min_sdk, data)
+        res = audit_file(args.manifest, args.nsc, args.target_sdk, args.min_sdk, data, args.required_target_sdk)
     except AuditError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

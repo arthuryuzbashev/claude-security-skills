@@ -1,6 +1,8 @@
 # OWASP Top 10 for LLM Applications (2025)
 
-The 2025 list from the OWASP GenAI Security Project, with what each risk looks like in a tool-using agent and the controls that help. Check the official list at genai.owasp.org for the full text.
+Contents: LLM01 to LLM10; OWASP Agentic Top 10 2026; mapping scanner findings.
+
+The 2025 list from the OWASP GenAI Security Project, with what each risk looks like in a tool-using agent and the controls that help. It is still the current LLM list (checked 2026-11-19). Check the official list at genai.owasp.org for the full text. The agentic list and a rule-id map are at the end.
 
 | ID | Name |
 |---|---|
@@ -96,12 +98,32 @@ In agents: a loop that keeps calling tools, a sub-agent fan-out with no cap, a p
 
 Controls: rate limits and quotas per user and key, max tokens and max steps per task, timeouts, budget alerts, monitoring.
 
+## OWASP Top 10 for Agentic Applications (2026)
+
+Published by the OWASP GenAI Security Project in December 2025 for agents that plan, use tools and act. Use it next to the LLM list when the system has tools, memory or other agents. Check names and text at genai.owasp.org (resource "OWASP Top 10 for Agentic Applications for 2026").
+
+| ID | Name | Typical agent failure |
+|---|---|---|
+| ASI01 | Agent Goal Hijack | injected content changes what the agent is trying to do |
+| ASI02 | Tool Misuse and Exploitation | a legitimate tool used in an unsafe way (deletes, sends, spends) |
+| ASI03 | Identity and Privilege Abuse | the agent acts with broader credentials than the task needs, or inherits a user's |
+| ASI04 | Agentic Supply Chain Vulnerabilities | poisoned MCP servers, plugins, tool descriptions or prompts loaded at run time |
+| ASI05 | Unexpected Code Execution | generated or fetched code runs without review |
+| ASI06 | Memory and Context Poisoning | bad data written to memory or RAG keeps steering later sessions |
+| ASI07 | Insecure Inter-Agent Communication | spoofed or unauthenticated messages between agents |
+| ASI08 | Cascading Failures | one agent's error or compromise spreads through a pipeline |
+| ASI09 | Human-Agent Trust Exploitation | the agent's confident output gets a person to approve something harmful |
+| ASI10 | Rogue Agents | an agent that drifts from or hides from its intended behavior |
+
 ## Mapping scanner findings
 
-| Finding | Category |
-|---|---|
-| PI-001 to PI-008 | LLM01 Prompt Injection (PI-007 also LLM02, it is the way data leaves) |
-| AGT-001, AGT-002, AGT-011, AGT-012, AGT-020 | LLM06 Excessive Agency |
-| AGT-010, AGT-030 | LLM02 Sensitive Information Disclosure |
-| AGT-040, AGT-043 | LLM03 Supply Chain |
-| AGT-041 | LLM02 (credentials and data in transit) |
+| Finding | LLM 2025 | Agentic 2026 |
+|---|---|---|
+| PI-001 to PI-008 | LLM01 Prompt Injection (PI-007 also LLM02, it is the way data leaves) | ASI01 |
+| PI-009 (tool poisoning) | LLM01, LLM02 | ASI01, ASI04 |
+| PI-010 (terminal escapes) | LLM01, LLM05 | ASI09 |
+| AGT-001, AGT-002, AGT-003, AGT-011, AGT-012, AGT-013, AGT-020 | LLM06 Excessive Agency | ASI02, ASI03, ASI05 |
+| AGT-010, AGT-030 | LLM02 Sensitive Information Disclosure | ASI03 |
+| AGT-014 | LLM02 (keys and prompts sent to another host) | ASI03, ASI04 |
+| AGT-040, AGT-043, AGT-044 | LLM03 Supply Chain | ASI04, ASI05 |
+| AGT-041 | LLM02 (credentials and data in transit) | ASI07 |

@@ -4,6 +4,7 @@
 Usage:
   ios_plist_audit.py App/Info.plist
   ios_plist_audit.py Payload/App.app/Info.plist --entitlements app.entitlements --json
+  ios_plist_audit.py App/Info.plist --privacy-manifest App/PrivacyInfo.xcprivacy
   codesign -d --entitlements :- App.app > ent.plist && ios_plist_audit.py Info.plist --entitlements ent.plist
   cat Info.plist | ios_plist_audit.py -
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 import re
 import sys
@@ -33,6 +35,17 @@ SECRET_PATTERNS = [
 ]
 SECRET_KEY_NAME = re.compile(r"(secret|password|passwd|private[_-]?key|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)", re.I)
 DEBUG_KEY_NAME = re.compile(r"(debug|staging|verbose[_-]?log|dev[_-]?mode|disable[_-]?ssl|allow[_-]?insecure)", re.I)
+
+# Required reason API categories and their approved reason codes (Apple "NSPrivacyAccessedAPIType",
+# verified 2026-11-19). App Store Connect rejects uploads that use these APIs without a declared reason.
+REQUIRED_REASONS = {
+    "NSPrivacyAccessedAPICategoryFileTimestamp": {"DDA9.1", "C617.1", "3B52.1", "0A2A.1"},
+    "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1", "8FFB.1", "3D61.1"},
+    "NSPrivacyAccessedAPICategoryDiskSpace": {"85F4.1", "E174.1", "7D9E.1", "B728.1"},
+    "NSPrivacyAccessedAPICategoryActiveKeyboards": {"3EC4.1", "54BD.1"},
+    "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1", "1C8F.1", "C56D.1", "AC6B.1"},
+}
+PRIVACY_MANIFEST_NAME = "PrivacyInfo.xcprivacy"
 
 
 class AuditError(Exception):
@@ -241,15 +254,116 @@ def audit_entitlements(ent: dict) -> List[Dict]:
     return out
 
 
-def audit(plist: dict, entitlements: Optional[dict] = None) -> Dict[str, object]:
+# ---------------------------------------------------------------- privacy manifest (PrivacyInfo.xcprivacy)
+
+def audit_privacy_manifest(pm: dict) -> List[Dict]:
+    out = []
+    loc = PRIVACY_MANIFEST_NAME
+    tracking = pm.get("NSPrivacyTracking") is True
+    domains = [d for d in pm.get("NSPrivacyTrackingDomains") or [] if isinstance(d, str) and d.strip()]
+    if tracking and not domains:
+        out.append(finding("IOS-050", "medium", "NSPrivacyTracking is true but no tracking domains are listed",
+                           "iOS blocks requests to declared tracking domains until the user allows tracking (App "
+                           "Tracking Transparency). With no domains listed, tracking traffic is not covered by that "
+                           "block, and the declaration does not match what the app does.",
+                           "List every domain that tracks in NSPrivacyTrackingDomains, or set NSPrivacyTracking false "
+                           "if the app does not track.", loc + "/NSPrivacyTrackingDomains", "MASVS-PRIVACY"))
+    elif domains and not tracking:
+        out.append(finding("IOS-050", "medium", "Tracking domains listed but NSPrivacyTracking is not true",
+                           f"{', '.join(sorted(domains)[:5])}: Apple reads NSPrivacyTrackingDomains only when "
+                           "NSPrivacyTracking is true, so the app declares that it does not track while naming "
+                           "tracking hosts.",
+                           "Set NSPrivacyTracking true (and ask for ATT permission), or remove the domains if they "
+                           "do not track.", loc + "/NSPrivacyTracking", "MASVS-PRIVACY"))
+
+    collected = pm.get("NSPrivacyCollectedDataTypes")
+    if isinstance(collected, list):
+        for i, entry in enumerate(collected):
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("NSPrivacyCollectedDataType") or f"entry {i}"
+            where = f"{loc}/NSPrivacyCollectedDataTypes[{i}]"
+            if entry.get("NSPrivacyCollectedDataTypeTracking") is True and not tracking:
+                out.append(finding("IOS-051", "medium", f"{kind} is used for tracking but NSPrivacyTracking is not true",
+                                   "The collected data entry says the data is used to track the user, while the "
+                                   "top-level flag says the app does not track. The privacy report and the App Store "
+                                   "privacy label will contradict each other.",
+                                   "Make NSPrivacyTracking true and list the tracking domains, or fix the entry.",
+                                   where, "MASVS-PRIVACY"))
+            missing = [k for k in ("NSPrivacyCollectedDataType", "NSPrivacyCollectedDataTypeLinked",
+                                   "NSPrivacyCollectedDataTypeTracking", "NSPrivacyCollectedDataTypePurposes")
+                       if k not in entry]
+            if missing:
+                out.append(finding("IOS-051", "low", f"Collected data entry {kind} is incomplete",
+                                   f"Missing {', '.join(missing)}. Xcode cannot build a correct privacy report from it.",
+                                   "Fill in the type, linked, tracking and purposes keys with Apple's listed values.",
+                                   where, "MASVS-PRIVACY"))
+
+    accessed = pm.get("NSPrivacyAccessedAPITypes")
+    if isinstance(accessed, list):
+        for i, entry in enumerate(accessed):
+            if not isinstance(entry, dict):
+                continue
+            cat = entry.get("NSPrivacyAccessedAPIType")
+            reasons = [r for r in entry.get("NSPrivacyAccessedAPITypeReasons") or [] if isinstance(r, str)]
+            where = f"{loc}/NSPrivacyAccessedAPITypes[{i}]"
+            if cat not in REQUIRED_REASONS:
+                out.append(finding("IOS-052", "medium", f"Unknown required reason API category {cat!r}",
+                                   "App Store Connect only accepts Apple's listed categories; a typo here means the "
+                                   "API use counts as undeclared and the upload is rejected.",
+                                   "Use one of: " + ", ".join(sorted(REQUIRED_REASONS)) + ".", where, "MASVS-PRIVACY"))
+                continue
+            short_cat = cat[len("NSPrivacyAccessedAPICategory"):]
+            if not reasons:
+                out.append(finding("IOS-052", "medium", f"{short_cat} API declared with no reason",
+                                   "Required reason APIs need at least one approved reason code; App Store Connect "
+                                   "rejects uploads without one.",
+                                   "Add the reason code(s) that match how the app uses the API: "
+                                   + ", ".join(sorted(REQUIRED_REASONS[cat])) + ".", where, "MASVS-PRIVACY"))
+                continue
+            wrong = [r for r in reasons if r not in REQUIRED_REASONS[cat]]
+            if wrong:
+                out.append(finding("IOS-052", "medium", f"{short_cat} API declares reason(s) that do not belong to it",
+                                   f"{', '.join(wrong)} is not an approved reason for {short_cat}. The declaration is "
+                                   "invalid and the API use counts as undeclared.",
+                                   "Valid codes for this category: " + ", ".join(sorted(REQUIRED_REASONS[cat])) + ".",
+                                   where, "MASVS-PRIVACY"))
+    return out
+
+
+def find_privacy_manifest(plist_path: Optional[str]) -> Optional[str]:
+    if not plist_path or plist_path == "-":
+        return None
+    candidate = os.path.join(os.path.dirname(os.path.abspath(plist_path)), PRIVACY_MANIFEST_NAME)
+    return candidate if os.path.isfile(candidate) else None
+
+
+def in_app_bundle(plist_path: Optional[str]) -> bool:
+    if not plist_path or plist_path == "-":
+        return False
+    return os.path.dirname(os.path.abspath(plist_path)).endswith(".app")
+
+
+def audit(plist: dict, entitlements: Optional[dict] = None, privacy_manifest: Optional[dict] = None,
+          bundle_without_manifest: bool = False) -> Dict[str, object]:
     out = audit_ats(plist) + audit_info(plist)
     if entitlements is not None:
         out += audit_entitlements(entitlements)
+    if privacy_manifest is not None:
+        out += audit_privacy_manifest(privacy_manifest)
+    elif bundle_without_manifest:
+        out.append(finding("IOS-053", "info", "No PrivacyInfo.xcprivacy in the app bundle",
+                           "Apps that use required reason APIs (UserDefaults, file timestamps, disk space, boot time, "
+                           "active keyboards) need a privacy manifest; App Store Connect has rejected uploads without "
+                           "one since May 1, 2024. Most apps touch UserDefaults through their own code or an SDK.",
+                           "Add PrivacyInfo.xcprivacy to the app target (Xcode: File > New File > App Privacy) and "
+                           "declare the APIs, data types and tracking domains.", PRIVACY_MANIFEST_NAME, "MASVS-PRIVACY"))
     out.sort(key=lambda f: -SEVERITY_ORDER.index(f["severity"]))
     return {
         "bundle_id": plist.get("CFBundleIdentifier"),
         "minimum_os": plist.get("MinimumOSVersion") or plist.get("LSMinimumSystemVersion"),
         "entitlements_checked": entitlements is not None,
+        "privacy_manifest_checked": privacy_manifest is not None,
         "findings": out,
     }
 
@@ -258,6 +372,7 @@ def render_text(res, path) -> str:
     lines = [f"iOS plist audit: {path}",
              f"bundle {res['bundle_id'] or '?'}, minimum OS {res['minimum_os'] or '?'}, "
              f"entitlements {'checked' if res['entitlements_checked'] else 'not given'}, "
+             f"privacy manifest {'checked' if res['privacy_manifest_checked'] else 'not given'}, "
              f"{len(res['findings'])} finding(s)", ""]
     if not res["findings"]:
         lines.append("No issues found.")
@@ -284,6 +399,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Static audit of an iOS Info.plist and entitlements.")
     ap.add_argument("plist", help="Info.plist (XML or binary), or - for stdin")
     ap.add_argument("--entitlements", help="entitlements plist (.entitlements or `codesign -d --entitlements :-` output)")
+    ap.add_argument("--privacy-manifest",
+                    help="PrivacyInfo.xcprivacy to audit (default: the one next to the Info.plist, if any)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any finding is at or above this severity (default: high)")
@@ -291,10 +408,12 @@ def main(argv=None) -> int:
     try:
         plist = load_plist(read_bytes(args.plist), args.plist)
         ent = load_plist(read_bytes(args.entitlements), args.entitlements) if args.entitlements else None
+        pm_path = args.privacy_manifest or find_privacy_manifest(args.plist)
+        pm = load_plist(read_bytes(pm_path), pm_path) if pm_path else None
     except AuditError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    res = audit(plist, ent)
+    res = audit(plist, ent, pm, bundle_without_manifest=pm is None and in_app_bundle(args.plist))
     if args.json:
         print(json.dumps({"plist": args.plist, **res}, indent=2, default=str))
     else:

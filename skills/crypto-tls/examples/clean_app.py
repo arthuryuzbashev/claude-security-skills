@@ -27,3 +27,14 @@ def fetch_profile(url):
 
 
 SIGNING_KEY = os.environ["SIGNING_KEY"]
+
+
+def derive_key(password, salt):
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", password, salt, 600_000)
+
+
+def wrap_key(public_key, key):
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    return public_key.encrypt(key, padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))

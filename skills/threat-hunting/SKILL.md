@@ -1,6 +1,6 @@
 ---
 name: threat-hunting
-description: Hypothesis-driven threat hunting and incident triage. Pulls IOCs (IPs, domains, URLs, emails, MD5/SHA1/SHA256 hashes, CVEs, file paths, registry keys) out of reports, emails and logs, refangs or defangs them, and maps behaviour notes or detection names to MITRE ATT&CK techniques with per-tactic coverage and an ATT&CK Navigator layer. Use whenever someone pastes a threat report, phishing email, IR notes or alert list, asks "what IOCs are in this", "defang these", "map this to ATT&CK", "which techniques does this cover", wants a hunt plan or hypothesis, or needs a Navigator layer.
+description: Hypothesis-driven threat hunting and incident triage. Pulls IOCs (IPs, domains, URLs, emails, MD5/SHA1/SHA256 hashes, CVEs, file paths, registry keys) out of reports, emails and logs, refangs or defangs them, and maps behaviour notes or detection names to MITRE ATT&CK v20 techniques (endpoint, identity and cloud) with per-tactic coverage and an ATT&CK Navigator layer. Flags revoked and deprecated technique IDs and names their replacements (T1562.001 is now T1685). Use whenever someone pastes a threat report, phishing email, IR notes or alert list, asks "what IOCs are in this", "defang these", "map this to ATT&CK", "which techniques does this cover", "is this technique ID still valid", wants a hunt plan or hypothesis (including MFA fatigue, OAuth consent, token theft or CloudTrail hunts), or needs a Navigator layer.
 ---
 
 # Threat Hunting
@@ -14,6 +14,8 @@ Turn a hunch, a report or a pile of notes into a scoped hunt: indicators to sear
 - IR or analyst notes need mapping to ATT&CK, or a coverage view per tactic
 - Planning a hunt: "are we hit by X", "do we see technique Y anywhere", "build a hunt from this report"
 - Building an ATT&CK Navigator layer for a report or a detection set
+- Identity and cloud hunts: MFA fatigue, illicit OAuth consent, token or cookie replay, root or no-MFA console logins, cloud logging turned off
+- Checking old reports or detections for technique IDs that ATT&CK has since revoked
 
 ## Ground rules
 
@@ -22,13 +24,14 @@ Turn a hunch, a report or a pile of notes into a scoped hunt: indicators to sear
 - Share defanged indicators in chat, tickets and email (`--defang`). Only refang for tooling that needs the real value (blocklists, SIEM lookups)
 - Do not submit customer files or internal data to public sandboxes or VirusTotal without the user's OK. Hash lookups are fine, uploads are not
 - The ATT&CK table in `attack_mapper.py` is a curated subset. No match means "not in the table", and any ID the script did not produce must be checked on attack.mitre.org before it goes in a report
+- Use current tactic names. Since ATT&CK v19, TA0005 is Stealth and TA0112 is Defense Impairment; "Defense Evasion" is the old name
 - Mask secrets: URLs with token, key or password parameters are shortened to the first 4 chars by the scripts. Keep it that way
 
 ## Workflow
 
 1. Write the hypothesis in one sentence: who or what, which behaviour, where it would show up. Example: "An attacker who phished a user ran encoded PowerShell from Office on a workstation in the last 14 days"
 2. Gather the inputs: the report, email, alert export or notes. Run `ioc_extract.py` on them to get a clean, de-duplicated indicator list
-3. Run `attack_mapper.py` on the behaviour notes. Use the techniques to pick data sources (`references/hunt-playbook.md` lists which log proves which technique)
+3. Run `attack_mapper.py` on the behaviour notes. Use the techniques to pick data sources (`references/hunt-playbook.md` lists which log proves which technique, including Entra ID, Microsoft 365 and CloudTrail). Fix any ID the script reports as revoked, deprecated or unknown before going on
 4. Search: indicators first (fast, cheap), then behaviour (slower, finds what IOCs miss). For queries, use the log-analysis skill's `query_translate.py` if it is installed, or the hunt playbook patterns
 5. For each hit: host, user, process tree, first and last seen, and whether it explains the hypothesis
 6. Conclude: confirmed, refuted, or inconclusive (with the data gap that blocked you). A refuted hunt is a result, record it
@@ -51,7 +54,14 @@ Formats: `text` (grouped, default), `list` (one value per line), `csv` (`type,va
 
 ### attack_mapper.py
 
-Maps free text (one observation or detection name per line) to ATT&CK Enterprise techniques with an embedded keyword table of about 90 well-known techniques across all 14 tactics. Technique IDs already in the text (`T1003.001`) are recognised directly; IDs not in the table are listed as "verify on attack.mitre.org", never guessed. Lines starting with `#` are comments.
+Maps free text (one observation or detection name per line) to ATT&CK Enterprise v20.1 techniques with an embedded keyword table of about 140 techniques across all 15 tactics, including identity and cloud (MFA fatigue, consent phishing, token replay, cloud credentials and roles, mailbox rules, CloudTrail tampering, instance metadata) and the new AI techniques (prompt injection, AI-enabled exfiltration). Technique IDs already in the text (`T1003.001`) are checked against the full v20.1 ID list:
+
+- In the table: mapped with name and tactics
+- Revoked (for example `T1070.001`, `T1562.001`, `T1086`): mapped to the current technique, with a `note` and `revoked_id` naming the old ID
+- Real but not in the table: listed with `valid: true` and a note to look up the tactics
+- Deprecated or made up: listed with `valid: false` and a note, never guessed
+
+Lines starting with `#` are comments.
 
 ```bash
 python3 scripts/attack_mapper.py examples/hunt_notes.txt
@@ -60,9 +70,9 @@ python3 scripts/attack_mapper.py notes.txt --navigator layer.json --layer-name "
 python3 scripts/attack_mapper.py --list          # the full embedded table
 ```
 
-Text output: each technique with the keyword that matched and the line numbers, the lines that matched nothing, and a per-tactic coverage bar (matched / techniques in the table for that tactic). `--json` keys: `lines` (`line`, `text`, `techniques`), `techniques` (`id`, `name`, `tactics`, `matched`, `lines`), `coverage` (`tactic`, `tactic_id`, `shortname`, `matched`, `in_table`, `techniques`). `--navigator` writes a layer (format 4.5, domain `enterprise-attack`) where the score is the number of lines that hit the technique; load it at the ATT&CK Navigator with "Open Existing Layer". Exit `0` on success, `2` on bad input.
+Text output: each technique with the keyword that matched and the line numbers, the lines that matched nothing, and a per-tactic coverage bar (matched / techniques in the table for that tactic). `--json` keys: `lines` (`line`, `text`, `techniques`), `techniques` (`id`, `name`, `tactics`, `matched`, `lines`, and for IDs from the text `note`, `valid`, `revoked_id` when they apply), `coverage` (`tactic`, `tactic_id`, `shortname`, `matched`, `in_table`, `techniques`). `--navigator` writes a layer (format 4.5, `versions.attack` "20", Navigator 5.3.2, domain `enterprise-attack`) where the score is the number of lines that hit the technique; load it at the ATT&CK Navigator with "Open Existing Layer". Exit `0` on success, `2` on bad input.
 
-Keyword mapping is a starting point. Read every match: "lsass" in a line about an AV exclusion is not credential dumping.
+Keyword mapping is a starting point. Read every match: "lsass" in a line about an AV exclusion is not credential dumping, and "Consent to application" is only illicit consent when the app and its scopes are suspicious.
 
 ## Output
 
@@ -81,5 +91,5 @@ Hand back a hunt record:
 
 ## References
 
-- `references/hunt-playbook.md` hypothesis template, the PEAK-style hunt loop, and per-technique data sources and hunt ideas for the techniques that come up most
+- `references/hunt-playbook.md` hypothesis template, the PEAK-style hunt loop, data sources (Windows, Linux, Entra ID, Microsoft 365, CloudTrail), hunt ideas for the techniques that come up most, identity and cloud hunts, and the ATT&CK v19/v20 old-to-new ID table
 - `references/ioc-handling.md` defang conventions, the pyramid of pain, IOC quality checks and sharing rules (TLP 2.0)

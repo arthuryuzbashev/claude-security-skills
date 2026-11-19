@@ -91,3 +91,19 @@ Where to look, by platform. Collect copies; never edit originals.
 ### Logon types (4624)
 
 2 interactive, 3 network (SMB, mapped drives), 4 batch (scheduled task), 5 service, 7 unlock, 8 network cleartext, 9 new credentials (runas /netonly), 10 remote interactive (RDP), 11 cached interactive.
+
+## Cloud and identity logs
+
+Export these early: default retention is short and the clock started at the first malicious event, not at detection. Retention depends on licence and settings, so check the tenant before relying on these defaults.
+
+| Source | What it shows | Default reach |
+|---|---|---|
+| AWS CloudTrail event history | Management API calls per region (who, from which IP and key, what) | 90 days, per region; a trail or CloudTrail Lake keeps more. S3 object reads are data events and only logged if enabled |
+| AWS GuardDuty | Findings for odd API use, crypto mining, credential exfiltration | Findings kept 90 days |
+| Microsoft Entra ID sign-in and audit logs | Sign-ins with IP, app, MFA result, conditional access; directory changes | 7 days on Free, 30 days with P1/P2 |
+| Microsoft 365 unified audit log | Mailbox, SharePoint, OneDrive, Teams and admin actions | 180 days on Audit (Standard), 1 year for some record types with Audit (Premium) |
+| Azure Activity log | Subscription-level resource changes | 90 days |
+| Google Cloud audit logs | Admin Activity (always on), Data Access (mostly off by default) | Admin Activity 400 days, Data Access 30 days |
+| Okta System Log | Sign-ins, MFA, admin and app events | 90 days |
+
+`timeline_build.py` reads JSON exports of these as they are (time from `eventTime`, `createdDateTime`, `published`, `CreationTime`; IP from `sourceIPAddress`, `ipAddress`, `client.ipAddress`, `ClientIP`). Calls that switch logging off (StopLogging, DeleteTrail, DeleteDetector, DeleteFlowLogs) are flagged by `--flag-tampering`.

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check dependency names for typosquats, risky install scripts and dependency confusion.
 
-Reads requirements*.txt, pyproject.toml ([project] dependencies) and
-package.json. Compares names against an embedded list of popular PyPI and
-npm packages. Offline: it never queries a registry.
+Reads requirements*.txt, pyproject.toml ([project] dependencies), package.json
+and package-lock.json. Compares names against an embedded list of popular PyPI
+and npm packages, flags exact versions known to be malicious and install hooks
+that match the Shai-Hulud worm. Offline: it never queries a registry.
 
 Usage:
   typosquat_check.py requirements.txt package.json
@@ -53,6 +54,29 @@ AFFIX_SUFFIXES = ("-python", "-py", "-js", ".js", "js", "-node", "-npm")
 
 RISKY_SCRIPT = re.compile(r"(curl|wget|https?://|node\s+-e|base64|eval\(|\|\s*(ba)?sh\b|powershell|child_process)", re.I)
 INSTALL_HOOKS = ("preinstall", "install", "postinstall")
+# Shai-Hulud 2.0 (November 2025): preinstall ran `node setup_bun.js`, which installed Bun and ran bun_environment.js.
+WORM_HOOK = re.compile(r"setup_bun\.js|bun_environment\.js", re.I)
+
+# Versions published by attackers and pulled from the registry. Exact matches only; a range that could
+# have resolved to one during the exposure window shows up in the lockfile, so scan package-lock.json too.
+KNOWN_MALICIOUS = {
+    "npm": {
+        # 2025-09-08 maintainer phishing (chalk/debug), StepSecurity and Wiz lists
+        "ansi-styles": {"6.2.2"}, "strip-ansi": {"7.1.1"}, "ansi-regex": {"6.2.1"}, "debug": {"4.4.2"},
+        "color-convert": {"3.1.1"}, "color-name": {"2.0.1"}, "supports-color": {"10.2.1"}, "chalk": {"5.6.1"},
+        "wrap-ansi": {"9.0.1"}, "slice-ansi": {"7.1.1"}, "color": {"5.0.1"}, "color-string": {"2.1.1"},
+        "is-arrayish": {"0.3.3"}, "simple-swizzle": {"0.2.3"}, "supports-hyperlinks": {"4.1.1"}, "has-ansi": {"6.0.1"},
+        "chalk-template": {"1.1.1"}, "backslash": {"0.2.1"},
+        # 2025-09-15 Shai-Hulud worm start (OSV MAL-2025-47141)
+        "@ctrl/tinycolor": {"4.1.1", "4.1.2"},
+    },
+    "pypi": {
+        # 2024-12 release pipeline compromise (PyPI blog 2024-12-11)
+        "ultralytics": {"8.3.41", "8.3.42", "8.3.45", "8.3.46"},
+    },
+}
+EXACT_NPM = re.compile(r"^\s*=?v?(\d+\.\d+\.\d+\S*)\s*$")
+PIN_PY = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*===?\s*([0-9][^\s;#,\]\"']*)")
 
 
 def finding(fid: str, severity: str, title: str, detail: str, fix: str, location: str = "") -> Dict[str, str]:
@@ -212,8 +236,57 @@ def _internal(name: str, prefixes: List[str]) -> bool:
     return any(n == p or n.startswith((p + "-", p + "_", p + ".")) for p in prefixes)
 
 
+def _malicious(name: str, version: str, eco: str, location: str) -> Optional[Dict[str, str]]:
+    key = name.lower() if eco == "npm" else pep503(name)
+    bad = KNOWN_MALICIOUS[eco].get(key)
+    if not bad or version not in bad:
+        return None
+    return finding("TYPO-012", "critical", f"Known malicious release: {name}@{version}",
+                   "This exact version was published by an attacker and later removed from the registry. Anything that installed it ran the payload.",
+                   "Pin a clean version, delete node_modules or the virtualenv and the package cache, and rotate every token and key the machine or CI runner could read.",
+                   location)
+
+
+def pinned_versions(base: str, text: str) -> List[Tuple[str, str, str, int]]:
+    """(name, version, eco, line) for exact pins in manifests and every entry of an npm lockfile."""
+    out: List[Tuple[str, str, str, int]] = []
+    if base in ("package-lock.json", "npm-shrinkwrap.json"):
+        data = json.loads(text)
+        pkgs = data.get("packages") if isinstance(data, dict) else None
+        if isinstance(pkgs, dict):
+            for key, meta in pkgs.items():
+                if key and isinstance(meta, dict) and isinstance(meta.get("version"), str):
+                    name = meta.get("name") or key.rsplit("node_modules/", 1)[-1]
+                    out.append((name, meta["version"], "npm", _json_line(text, f'"{key}"')))
+        return out
+    if base.endswith(".json"):
+        data = json.loads(text)
+        for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "overrides"):
+            block = data.get(section) if isinstance(data, dict) else None
+            if isinstance(block, dict):
+                for name, spec in block.items():
+                    m = EXACT_NPM.match(str(spec))
+                    if m:
+                        out.append((name, m.group(1), "npm", _json_line(text, f'"{name}"')))
+        return out
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip().strip(",").strip("\"'")
+        m = PIN_PY.match(line)
+        if m:
+            out.append((m.group(1), m.group(2), "pypi", n))
+    return out
+
+
+def check_lockfile(path: str, text: str) -> Tuple[List[Dict[str, str]], int]:
+    pins = pinned_versions(os.path.basename(path).lower(), text)
+    out = [f for f in (_malicious(n, v, e, f"{path}:{l}") for n, v, e, l in pins) if f]
+    return out, len(pins)
+
+
 def check_file(path: str, text: str, allow: set, prefixes: List[str]) -> Tuple[List[Dict[str, str]], int]:
     base = os.path.basename(path).lower()
+    if base in ("package-lock.json", "npm-shrinkwrap.json"):
+        return check_lockfile(path, text)
     out: List[Dict[str, str]] = []
     scripts: Dict[str, Tuple[str, int]] = {}
     options: List[Tuple[str, int]] = []
@@ -249,9 +322,18 @@ def check_file(path: str, text: str, allow: set, prefixes: List[str]) -> Tuple[L
                                    (", and this file uses --extra-index-url." if extra_index else "."),
                                    "Install from a single trusted index, pin versions with hashes, and register the name on PyPI as a placeholder.",
                                    f"{path}:{line}"))
+    for name, version, eco, line in pinned_versions(base, text):
+        f = _malicious(name, version, eco, f"{path}:{line}")
+        if f:
+            out.append(f)
     for hook in INSTALL_HOOKS:
         if hook in scripts:
             cmd, line = scripts[hook]
+            if WORM_HOOK.search(cmd):
+                out.append(finding("TYPO-011", "critical", f"npm {hook} matches the Shai-Hulud 2.0 worm",
+                                   f"'{cmd[:120]}' runs setup_bun.js or bun_environment.js, the loader the November 2025 worm added to infected packages. It steals npm, GitHub and cloud credentials and republishes itself.",
+                                   "Do not install. If it already ran: remove the package, look for a self-hosted runner named SHA1HULUD and a .github/workflows/discussion.yaml, rotate all credentials on that machine.",
+                                   f"{path}:{line}"))
             risky = bool(RISKY_SCRIPT.search(cmd))
             out.append(finding("TYPO-010", "high" if risky else "medium", f"npm {hook} script",
                                f"'{cmd[:120]}' runs automatically on npm install" +
@@ -267,7 +349,8 @@ def collect(paths: List[str]) -> List[str]:
         if os.path.isdir(p):
             for name in sorted(os.listdir(p)):
                 low = name.lower()
-                if low == "package.json" or low == "pyproject.toml" or re.match(r"^requirements.*\.(txt|in)$", low):
+                if low in ("package.json", "package-lock.json", "npm-shrinkwrap.json", "pyproject.toml") or \
+                        re.match(r"^requirements.*\.(txt|in)$", low):
                     files.append(os.path.join(p, name))
         else:
             files.append(p)
@@ -276,7 +359,7 @@ def collect(paths: List[str]) -> List[str]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Check dependency names for typosquats, install scripts and dependency confusion (offline).")
-    ap.add_argument("paths", nargs="+", help="requirements*.txt, pyproject.toml, package.json, or a directory")
+    ap.add_argument("paths", nargs="+", help="requirements*.txt, pyproject.toml, package.json, package-lock.json, or a directory")
     ap.add_argument("--internal-prefix", action="append", default=[], metavar="PREFIX",
                     help="name prefix of your private packages (repeatable), e.g. acme")
     ap.add_argument("--allow", action="append", default=[], metavar="NAME", help="package name you have verified (repeatable)")
@@ -290,7 +373,7 @@ def main(argv=None) -> int:
     findings: List[Dict[str, str]] = []
     total, files = 0, collect(args.paths)
     if not files:
-        print("error: no requirements*.txt, pyproject.toml or package.json found", file=sys.stderr)
+        print("error: no requirements*.txt, pyproject.toml, package.json or package-lock.json found", file=sys.stderr)
         return 2
     try:
         for path in files:

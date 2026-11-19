@@ -1,6 +1,6 @@
 ---
 name: ai-agent-security
-description: Security review for AI agents, LLM apps and coding assistants. Scans docs, web pages, issues, emails and repo files for prompt injection (instruction-override phrases, hidden HTML/CSS text, zero-width and Unicode tag characters, bidi controls, base64-hidden instructions, markdown image exfiltration URLs, fake chat-template and tool-call markup) and audits agent configs (Claude Code .claude/settings.json, settings.local.json, .mcp.json, Cursor and VS Code mcp.json, claude_desktop_config.json) for bypassPermissions, Bash(*) or Bash(curl:*) allow rules, missing .env deny rules, risky hooks, unpinned npx -y MCP servers, inline API keys and plain-http MCP URLs. Use whenever someone asks "is this MCP server safe", "harden my Claude Code / Cursor setup", "check this page or README for prompt injection", mentions OWASP LLM Top 10, excessive agency, data exfiltration through an agent, jailbreaks in content, or before giving an agent tools, secrets or auto-approve.
+description: Security review for AI agents, LLM apps and coding assistants. Scans docs, web pages, issues, emails, tool descriptions and repo files for prompt injection (override phrases, hidden HTML/CSS text, zero-width and Unicode tag characters, bidi controls, base64-hidden instructions, image exfiltration URLs, fake chat-template markup, MCP tool poisoning that asks for ~/.ssh or mcp.json, terminal escape sequences) and audits agent configs (Claude Code settings.json, .mcp.json, Cursor and VS Code mcp.json, claude_desktop_config.json) for bypassPermissions, broad Bash allow rules, weak sandbox settings, ANTHROPIC_BASE_URL or proxy redirects, risky command and HTTP hooks, unpinned or curl-piped MCP servers, inline keys and plain-http MCP URLs. Use when someone asks "is this MCP server safe", "harden my Claude Code / Cursor setup", "check this page for prompt injection", mentions OWASP LLM or Agentic Top 10, excessive agency or agent data exfiltration, or before giving an agent tools, secrets or auto-approve.
 ---
 
 # AI agent security
@@ -12,7 +12,7 @@ Find the content that can hijack an agent and the settings that decide how much 
 - Before an agent reads untrusted content: web pages, issues, PR descriptions, emails, tickets, third-party READMEs, scraped docs, RAG sources
 - Reviewing or setting up Claude Code permissions, hooks or MCP servers, or any agent's tool access
 - "Is this MCP server / skill / prompt file safe to add?"
-- Designing an LLM feature and mapping its risks to the OWASP Top 10 for LLM Applications (2025)
+- Designing an LLM feature or agent and mapping its risks to the OWASP Top 10 for LLM Applications (2025) and the OWASP Top 10 for Agentic Applications (2026)
 - After an incident where an agent did something nobody asked for
 
 ## Ground rules
@@ -30,7 +30,7 @@ Find the content that can hijack an agent and the settings that decide how much 
 2. Configs: run `agent_config_audit.py <project>` and, if the user agrees, on their user-level config too (`~/.claude/settings.json`, `claude_desktop_config.json`). Fix critical and high first
 3. Content: run `prompt_injection_scan.py` on the untrusted inputs (saved pages, docs folders, issue exports). Files scoring 50+ need a human look before any agent reads them with tools enabled
 4. Check the dangerous combination: untrusted input + access to private data + a way to send data out (web fetch, image rendering, email, git push, any network tool). If all three exist, break at least one leg
-5. Map findings to OWASP LLM categories with `references/owasp-llm-top10-2025.md` and give hardened config diffs from `references/agent-hardening-guide.md`
+5. Map findings to OWASP LLM 2025 and Agentic 2026 categories with `references/owasp-llm-top10-2025.md` and give hardened config diffs from `references/agent-hardening-guide.md`
 6. Re-run both scripts after changes
 
 ## Tools
@@ -55,6 +55,8 @@ Directories are walked (skips `.git`, `node_modules`, build output); binaries an
 | PI-006 | high | base64 that decodes to instructions |
 | PI-007 | low/high | markdown or HTML images whose URL has a query string (exfiltration channel); badge hosts are skipped |
 | PI-008 | medium/high | chat-template tokens (`<\|im_start\|>`, `[INST]`, `<<SYS>>`), fake tool-call or system tags, fake "System:" lines with instructions |
+| PI-009 | medium/high | a request to read or send a credential or agent-config file (`~/.ssh/id_*`, `.aws/credentials`, `.netrc`, `mcp.json`, `.kube/config`), the shape of MCP tool poisoning; high with `<IMPORTANT>` tags, "sidenote", "silently" or an override phrase. Negated lines ("never commit ~/.ssh/id_rsa") and `.pub` keys are skipped |
+| PI-010 | low/high | terminal escape sequences: cursor moves, erase, conceal, OSC 8 links or OSC 52 clipboard writes (high) can hide text from a person in a terminal; color codes only are low |
 
 Each file gets a score from 0 to 100 (critical 40, high 25, medium 10, low 3, capped): `clean` 0, `low` under 25, `suspicious` under 50, `likely injection` 50+.
 Snippets are printed with invisible characters escaped as `<U+XXXX>`.
@@ -70,16 +72,20 @@ Reads JSON with comments and trailing commas (VS Code style). Understands `mcpSe
 
 | ID | Severity | Check |
 |---|---|---|
-| AGT-001 | critical | `permissions.defaultMode: "bypassPermissions"` |
+| AGT-001 | critical | `permissions.defaultMode: "bypassPermissions"` (Claude Code 2.1.257+ ignores it in project and local files; older versions and user settings do not) |
 | AGT-002 | critical/high/medium | broad allow rules: `Bash` / `Bash(*)` (critical); any-argument rules for interpreters, network and privilege tools like `Bash(curl:*)`, `Bash(python3 *)`, `Bash(sudo:*)` (high); `Bash(docker:*)`, `Bash(npx:*)`, `Bash(git:*)`, unrestricted `WebFetch` (medium) |
+| AGT-003 | medium/low | `skipDangerousModePermissionPrompt: true` (low in a shared `.claude/settings.json`, where Claude Code ignores it) |
 | AGT-010 | medium | Claude settings with no deny rule for `.env` |
 | AGT-011 | high | `additionalDirectories` includes `/`, `~` or a whole home folder |
 | AGT-012 | medium | `enableAllProjectMcpServers: true` |
-| AGT-020 | high/medium | hooks that pipe a download into a shell (high) or make network calls (medium) |
+| AGT-013 | high/medium/low | weakened sandbox: `allowedDomains: ["*"]`, the Docker socket in `allowUnixSockets`, `allowWrite` on home or `/` (high); `allowAllUnixSockets`, write access to shell rc files or credential folders, `filesystem.disabled` (medium); shell or interpreter wildcards in `excludedCommands` (high); `enableWeakerNestedSandbox` (low) |
+| AGT-014 | high/medium | `env` that reroutes API traffic (`ANTHROPIC_BASE_URL`, `*_BASE_URL`, `HTTPS_PROXY`) to a host that is not Anthropic, a cloud provider or loopback (high in repo files, CVE-2026-21852), or turns TLS checks off (`NODE_TLS_REJECT_UNAUTHORIZED=0`) |
+| AGT-020 | high/medium | command hooks and helper commands (`apiKeyHelper`, `awsAuthRefresh`, `otelHeadersHelper`, `statusLine`) that pipe a download into a shell (high) or make network calls (medium); HTTP hooks that post event data off the machine (medium, high over plain http) |
 | AGT-030 | high | secrets inline in `env`, MCP `env`/`headers`, args, URLs or hook commands (masked) |
 | AGT-040 | medium | MCP server started with `npx`/`bunx`/`pnpm dlx`/`yarn dlx`/`uvx` and no pinned version |
 | AGT-041 | high | MCP URL over plain `http://` to a non-loopback host |
 | AGT-043 | high | MCP server in a container with `--privileged`, the host root mounted or the Docker socket |
+| AGT-044 | high/medium | MCP server started through a shell that pipes a download into an interpreter (high) or fetches with curl/wget at each start (medium) |
 
 A narrow rule like `Bash(npm run test:*)` is not flagged; only "this command with any arguments" is.
 
@@ -95,10 +101,10 @@ Then:
 
 For content findings, quote the hidden or decoded text (escaped) so the user sees what the agent would have read.
 For config findings, give the corrected JSON block.
-Map each finding to its OWASP LLM 2025 category by name.
+Map each finding to its OWASP LLM 2025 category by name, and to the Agentic 2026 category (ASI01 to ASI10) when an agent with tools is involved.
 End with what the scan cannot see: runtime behavior of MCP servers, tool descriptions served at run time, paraphrased injections, and content fetched later.
 
 ## References
 
-- `references/owasp-llm-top10-2025.md` the ten 2025 categories, what each looks like in an agent, and controls
-- `references/agent-hardening-guide.md` hardened Claude Code settings, MCP vetting checklist, the three-leg rule, hooks, sandboxing and incident steps
+- `references/owasp-llm-top10-2025.md` the ten LLM 2025 categories, what each looks like in an agent, and controls, plus the Agentic Top 10 2026 and a rule-id map
+- `references/agent-hardening-guide.md` hardened Claude Code settings, sandbox settings, MCP vetting checklist (MCP spec 2025-11-25 security best practices), the three-leg rule, hooks and incident steps

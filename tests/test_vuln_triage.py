@@ -5,6 +5,7 @@ from _helpers import call_main, load_script, run_cli, skill_path
 
 cvss = load_script("vuln-triage", "cvss_calc")
 deps = load_script("vuln-triage", "dep_audit")
+ssvc = load_script("vuln-triage", "ssvc_decide")
 EX = skill_path("vuln-triage", "examples")
 
 
@@ -76,6 +77,119 @@ class CvssTests(unittest.TestCase):
         self.assertEqual(run_cli("vuln-triage", "cvss_calc", "--help").returncode, 0)
 
 
+class CvssV4Tests(unittest.TestCase):
+    # expected values from the FIRST reference calculator (cvss-v4-calculator JS)
+    KNOWN = {
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N": 9.3,
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:U": 8.1,
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:L/IR:L/AR:L/MAV:A": 6.2,
+        "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N": 8.5,
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N": 5.1,
+        "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N": 2.3,
+        "CVSS:4.0/AV:P/AC:H/AT:P/PR:H/UI:A/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N": 1.0,
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/MSI:S": 10.0,
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N": 0.0,
+    }
+
+    def test_known_scores(self):
+        for vector, expected in self.KNOWN.items():
+            self.assertEqual(cvss.score_vector(vector)["score"], expected, vector)
+
+    def test_labels_and_base(self):
+        r = cvss.score_vector("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N")
+        self.assertEqual((r["version"], r["nomenclature"], r["macrovector"], r["severity"]), ("4.0", "CVSS-B", "000200", "critical"))
+        self.assertIn("note", r, "missing E is called out")
+        r = cvss.score_vector("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:L/IR:L/AR:L/MAV:A")
+        self.assertEqual((r["nomenclature"], r["base_score"], r["score"]), ("CVSS-BTE", 9.3, 6.2))
+        self.assertNotIn("note", r)
+        r = cvss.score_vector("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/U:Amber/AU:Y")
+        self.assertEqual(r["supplemental"], {"U": "Amber", "AU": "Y"})
+        self.assertEqual(r["score"], 9.3, "supplemental metrics do not change the score")
+
+    def test_invalid_v4(self):
+        self.assertRaises(ValueError, cvss.parse_vector, "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N")
+        for bad in ("CVSS:4.0/AV:N/AC:L/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",       # no AT
+                    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:R/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",  # v3 UI value
+                    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/S:U",  # v3 scope
+                    "CVSS:4.0/AV:N/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:S/SA:N"):  # S only in MSI/MSA
+            with self.assertRaises(ValueError, msg=bad):
+                cvss.score_vector(bad)
+
+    def test_cli_v4_file(self):
+        code, out, _ = call_main(cvss, ["--file", str(EX / "vectors-v4.txt"), "--json"])
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertEqual(len(data["results"]), 5)
+        self.assertEqual(data["errors"], [])
+        code, out, _ = call_main(cvss, ["CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N"])
+        self.assertEqual(code, 0)
+        self.assertIn("CVSS-B 2.3 (low)", out)
+
+
+class SsvcTests(unittest.TestCase):
+    def test_tables(self):
+        self.assertEqual(ssvc.COORDINATOR[("active", "yes", "total")][2], "act")
+        self.assertEqual(ssvc.COORDINATOR[("none", "no", "partial")][0], "track")
+        self.assertEqual(ssvc.COORDINATOR[("poc", "no", "total")][1], "track*")
+        self.assertEqual(len(ssvc.COORDINATOR) * 3, 36)
+        self.assertEqual(ssvc.BOD_26_04[("yes", "yes", "yes", "total")], "3 days & forensic investigation")
+        self.assertEqual(ssvc.BOD_26_04[("no", "no", "no", "partial")], "fix on system upgrade")
+        self.assertEqual(len(ssvc.BOD_26_04), 16)
+
+    def test_vulnrichment_record(self):
+        code, out, _ = call_main(ssvc, [str(EX / "vulnrichment-CVE-2099-0001.json"), "--mission", "high",
+                                        "--exposed", "yes", "--epss", str(EX / "epss.csv"), "--json"])
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        r = data["results"][0]
+        self.assertEqual((r["cve"], r["decision"], r["bod_26_04"]), ("CVE-2099-0001", "attend", "3 days"))
+        self.assertEqual(r["assumed"], [])
+        self.assertEqual(r["epss"]["epss"], 0.912)
+        self.assertEqual(data["epss_model"], "v2099.01.01")
+        f = data["findings"][0]
+        self.assertEqual((f["id"], f["severity"]), ("SSVC-001", "critical"))
+        self.assertTrue({"id", "severity", "title", "detail", "fix", "location"} <= set(f))
+
+    def test_kev_forces_active(self):
+        code, out, _ = call_main(ssvc, ["CVE-2099-1002", "--kev", str(EX / "kev.json"), "--exploitation", "none",
+                                        "--automatable", "no", "--impact", "total", "--mission", "medium",
+                                        "--exposed", "no", "--json"])
+        r = json.loads(out)["results"][0]
+        self.assertEqual(r["inputs"]["exploitation"], "active")
+        self.assertEqual((r["decision"], r["bod_26_04"]), ("attend", "14 days"))
+        self.assertEqual(r["kev_details"]["knownRansomwareCampaignUse"], "Known")
+        self.assertEqual(code, 1)
+
+    def test_low_risk_and_assumptions(self):
+        args = ["CVE-2099-0003", "--exploitation", "none", "--automatable", "no", "--impact", "partial",
+                "--mission", "low", "--exposed", "no", "--json"]
+        code, out, _ = call_main(ssvc, args)
+        r = json.loads(out)["results"][0]
+        self.assertEqual((r["decision"], r["bod_26_04"], code), ("track", "fix on system upgrade", 0))
+        _, out, _ = call_main(ssvc, ["CVE-2099-0003", "--json"])
+        r = json.loads(out)["results"][0]
+        self.assertEqual(len(r["assumed"]), 5, "every missing input is named")
+        self.assertEqual((r["inputs"]["automatable"], r["inputs"]["technical_impact"]), ("no", "total"))
+
+    def test_epss_json_and_bad_input(self):
+        import tempfile, os
+        fd, path = tempfile.mkstemp(prefix="cst-vuln-triage-", suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"status": "OK", "data": [{"cve": "CVE-2099-0002", "epss": "0.5", "percentile": "0.97"}]}, fh)
+        try:
+            scores, model = ssvc.load_epss(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(scores["CVE-2099-0002"], {"epss": 0.5, "percentile": 0.97})
+        self.assertEqual(call_main(ssvc, ["CVE-2099-0001", "--exploitation", "maybe"])[0], 2)
+        self.assertEqual(call_main(ssvc, [str(EX / "missing.json")])[0], 2)
+        self.assertEqual(call_main(ssvc, [str(EX / "kev.json")])[0], 2, "not a CVE record")
+
+    def test_help_subprocess(self):
+        self.assertEqual(run_cli("vuln-triage", "ssvc_decide", "--help").returncode, 0)
+
+
 class ParserTests(unittest.TestCase):
     def test_requirements(self):
         d, f = deps.parse_requirements((EX / "python-app" / "requirements.txt").read_text())
@@ -143,6 +257,12 @@ class MatchingTests(unittest.TestCase):
                          ("critical", 9.8))
         self.assertEqual(deps.vuln_severity({"database_specific": {"severity": "MODERATE"}}), ("medium", None))
         self.assertEqual(deps.vuln_severity({}), ("medium", None))
+        v4 = {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}
+        self.assertEqual(deps.vuln_severity({"severity": [v4]}), ("critical", 9.3))
+        low3 = {"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"}
+        self.assertEqual(deps.vuln_severity({"severity": [low3, v4]}), ("critical", 9.3), "higher of v3 and v4")
+        self.assertEqual(deps.vuln_severity({"severity": [{"type": "CVSS_V4", "score": "CVSS:4.0/AV:N"}]}),
+                         ("medium", None), "broken v4 vector falls back")
 
     def test_alias_merge(self):
         d = [deps.dep("requests", "2.19.1", "PyPI", "r.txt:1")]
@@ -179,6 +299,18 @@ class DepAuditCliTests(unittest.TestCase):
         self.assertEqual(plan["pyyaml"], "5.4")
         for f in data["findings"]:
             self.assertTrue({"id", "severity", "title", "detail", "fix"} <= set(f))
+
+    def test_kev_details_and_epss(self):
+        _, out, _ = self.run_examples("--epss", str(EX / "epss.csv"))
+        vulns = {f["vuln_id"]: f for f in json.loads(out)["findings"] if f["id"] == "DEP-001"}
+        qs = vulns["EXAMPLE-JS-0002"]
+        self.assertEqual((qs["kev_due_date"], qs["kev_ransomware"], qs["epss"]), ("2099-01-04", "Known", 0.71))
+        self.assertIn("ransomware", qs["detail"])
+        self.assertEqual(vulns["EXAMPLE-PY-0001"]["epss_percentile"], 0.9961)
+        self.assertNotIn("epss", vulns["EXAMPLE-JS-0003"], "no CVE alias, no EPSS")
+        self.assertEqual(vulns["EXAMPLE-PY-0003"]["cvss"], 5.3, "CVSS_V4 vector scored")
+        _, out, _ = self.run_examples()
+        self.assertFalse(any("epss" in f for f in json.loads(out)["findings"]), "no --epss, no epss keys")
 
     def test_no_dev_drops_dev_vulns(self):
         _, out, _ = self.run_examples("--no-dev")

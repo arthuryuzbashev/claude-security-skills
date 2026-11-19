@@ -30,6 +30,7 @@ INCIDENTS = {
     "data-leak": "Data exposed or exfiltrated (public bucket, leaked dump, mis-sent file)",
     "insider": "A current or former employee or contractor misusing access",
     "lost-device": "Laptop or phone lost or stolen",
+    "cloud-compromise": "Cloud account or keys abused: leaked access keys, odd API calls, crypto mining, new IAM users",
 }
 
 # Evidence goes to external media or a network share, never the suspect disk.
@@ -174,6 +175,12 @@ TYPE_STEPS: Dict[str, List[Dict]] = {
                           "Get-ADUser -Filter * -Properties whenCreated | Where whenCreated -gt (Get-Date).AddDays(-14) "
                           "| Select SamAccountName,whenCreated",
                           "Get-GPO -All | Sort ModificationTime -Descending | Select -First 10 DisplayName,ModificationTime"]}),
+        step("evidence", "Hypervisors, NAS and backup consoles",
+             "Many crews encrypt VMware ESXi datastores or NAS shares directly, which no Windows EDR sees. Check the "
+             "management plane for new local accounts, SSH being enabled and shell activity. Read only, from the console or SSH.",
+             {"any": ["ESXi: esxcli system account list; esxcli network ip connection list",
+                      "ESXi: copy /var/log/shell.log, /var/log/hostd.log and /var/log/auth.log to evidence media",
+                      "vCenter / NAS / backup console: export the audit or event log for the last 14 days"]}),
         step("notify", "Legal, insurance and authorities before any contact with the attacker",
              "Paying may be illegal if the group is sanctioned, and insurers usually require notice before negotiation. "
              "Personal data involved can trigger breach notification deadlines (GDPR: 72 hours to the authority)."),
@@ -338,6 +345,52 @@ TYPE_STEPS: Dict[str, List[Dict]] = {
         step("notify", "Police report and data protection check",
              "A police report number is often needed for insurance. Unencrypted personal data on the device may be a notifiable breach."),
     ],
+    "cloud-compromise": [
+        step("contain", "Cut the abused credential, keep its history",
+             "Leaked cloud keys get used within minutes, often to start mining instances in every region or to copy data. "
+             "Deactivate (not delete) the key or attach a deny-all policy, and revoke sessions already issued from it.",
+             {"any": ["AWS: aws iam update-access-key --user-name <user> --access-key-id <key-id> --status Inactive",
+                      "AWS: aws iam attach-user-policy --user-name <user> --policy-arn arn:aws:iam::aws:policy/AWSDenyAll",
+                      "AWS role: IAM console > Roles > <role> > Revoke active sessions (denies tokens issued before now)",
+                      "Azure: disable the service principal or user in Entra ID; Graph: Revoke-MgUserSignInSession -UserId <user>",
+                      "Google Cloud: gcloud iam service-accounts keys disable <key-id> --iam-account <sa-email>"]},
+             approval=True),
+        step("evidence", "Everything the identity did, in every region",
+             "The control-plane audit log is the timeline. CloudTrail event history covers 90 days per region; a trail or "
+             "CloudTrail Lake keeps more. Export before anyone changes the account.",
+             {"any": ["AWS: aws ec2 describe-regions --query 'Regions[].RegionName' --output text",
+                      "AWS: aws cloudtrail lookup-events --region <region> --lookup-attributes "
+                      "AttributeKey=AccessKeyId,AttributeValue=<key-id> --max-results 50",
+                      "AWS: aws guardduty list-detectors; aws guardduty list-findings --detector-id <id>",
+                      "Azure: az monitor activity-log list --caller <user-or-app-id> --offset 7d",
+                      "Google Cloud: gcloud logging read 'protoPayload.authenticationInfo.principalEmail=\"<sa-email>\"' "
+                      "--freshness=7d --format=json"]}),
+        step("evidence", "New identities, keys, trust and sharing",
+             "Attackers create IAM users, access keys, login profiles and role trust policies to come back, and share "
+             "snapshots, AMIs or buckets with accounts they own. Search the audit log for these calls.",
+             {"any": ["AWS calls to look for: CreateUser, CreateAccessKey, CreateLoginProfile, AttachUserPolicy, PutUserPolicy, "
+                      "UpdateAssumeRolePolicy, CreateRole, ModifySnapshotAttribute, ModifyImageAttribute, PutBucketPolicy, "
+                      "StopLogging, DeleteTrail, DeleteDetector",
+                      "AWS: aws iam generate-credential-report; aws iam get-credential-report --query Content --output text "
+                      "| base64 --decode",
+                      "Azure: Entra audit log for new app credentials (Add service principal credentials) and role assignments",
+                      "Google Cloud: IAM policy changes (SetIamPolicy) and new service account keys (CreateServiceAccountKey)"]}),
+        step("evidence", "Resources the attacker started or touched",
+             "Crypto mining shows up as large instances or GPU quotas in regions you never use; data theft as snapshot "
+             "copies, new users on databases or big GetObject runs. Note the instance ids before you stop anything.",
+             {"any": ["AWS: aws ec2 describe-instances --region <region> --query "
+                      "'Reservations[].Instances[].[InstanceId,InstanceType,LaunchTime,State.Name]' --output table",
+                      "AWS: aws ce get-cost-and-usage --time-period Start=<yyyy-mm-dd>,End=<yyyy-mm-dd> --granularity DAILY "
+                      "--metrics UnblendedCost --group-by Type=DIMENSION,Key=REGION",
+                      "Azure / Google Cloud: list compute in all regions and the billing report by region and SKU"]}),
+        step("notify", "Open a case with the cloud provider",
+             "Providers help with abuse cleanup and sometimes with the bill. AWS may already have attached a compromised-key "
+             "quarantine policy and emailed the root address; read those notices before changing anything."),
+        step("recover", "Find where the key leaked and stop it happening again",
+             "Usual sources: a public or internal repo, CI logs, a container image, a laptop infostealer. Scan the git history "
+             "with a secrets scanner, move workloads to short-lived credentials (roles, workload identity federation) "
+             "and add billing and GuardDuty or Defender alerts."),
+    ],
 }
 
 
@@ -347,14 +400,14 @@ def build_plan(incident: str, platform: str) -> List[Dict]:
         raise ValueError(f"unknown incident type: {incident}")
     if platform not in PLATFORMS:
         raise ValueError(f"unknown platform: {platform}")
-    host_based = incident not in ("bec", "data-leak", "lost-device")
+    host_based = incident not in ("bec", "data-leak", "lost-device", "cloud-compromise")
     steps = list(PREPARE)
     if host_based:
         steps += VOLATILE
     specific = TYPE_STEPS[incident]
     order = {"prepare": 0, "volatile": 1, "contain": 2, "evidence": 3, "notify": 4, "recover": 5}
     # Containment that stops active damage (ransomware spread) goes before slower evidence work.
-    urgent = [s for s in specific if s["phase"] == "contain" and incident in ("ransomware", "data-leak", "lost-device")]
+    urgent = [s for s in specific if s["phase"] == "contain" and incident in ("ransomware", "data-leak", "lost-device", "cloud-compromise")]
     rest = [s for s in specific if s not in urgent]
     steps += [s for s in rest if s["phase"] == "prepare"]
     if urgent:  # stop active damage first; isolation keeps memory, it only drops live connections
@@ -383,6 +436,8 @@ def report_skeleton(incident: str, platform: str) -> str:
 | Severity | critical / high / medium / low |
 | Reported by / at (UTC) | |
 | Incident lead | |
+| Detection source | EDR / SIEM alert, user report, provider notice, third party |
+| Initial access (ATT&CK technique ID) | |
 | Last updated (UTC) | {today} |
 
 ## Summary
@@ -424,8 +479,10 @@ How they got in and why it worked.
 |---|---|---|---|
 
 ## Lessons learned and follow-ups
-| Fix | Owner | Due |
-|---|---|---|
+CSF 2.0 Function per fix (NIST SP 800-61 Rev. 3): GV govern, ID identify, PR protect, DE detect, RS respond, RC recover.
+
+| Fix | CSF 2.0 Function | Owner | Due |
+|---|---|---|---|
 """
 
 

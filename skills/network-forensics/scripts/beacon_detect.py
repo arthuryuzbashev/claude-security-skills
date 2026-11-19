@@ -8,13 +8,19 @@ intervals, with nearly fixed sizes. This script groups connections by
 regularity, size regularity, connection count and how much of the log window
 it covers.
 
-Input (auto-detected): Zeek conn.log (TSV with a #fields line), CSV with a
-header, a JSON array, or JSON lines. Recognized column names:
-  time:   ts, timestamp, time, start, start_time, first_seen
-  source: id.orig_h, src, src_ip, source, source_ip, saddr
-  dest:   id.resp_h, dst, dst_ip, dest, destination, dest_ip, daddr
-  port:   id.resp_p, dport, dst_port, dest_port, destination_port, port
-  bytes:  orig_bytes, bytes_out, bytes_sent, out_bytes, bytes, sent_bytes, length
+It also lists long-lived connections (BCN-002): implants that hold one
+session open instead of polling show up as a few very long connections.
+
+Input (auto-detected): Zeek conn.log (TSV with a #fields line, or Zeek JSON),
+Suricata eve.json (flow events are used when present), CSV with a header,
+a JSON array, or JSON lines. Recognized column names:
+  time:     flow.start, ts, timestamp, time, start, start_time, first_seen
+  source:   id.orig_h, src, src_ip, source, source_ip, saddr
+  dest:     id.resp_h, dst, dst_ip, dest, destination, dest_ip, daddr
+  port:     id.resp_p, dport, dst_port, dest_port, destination_port, port
+  bytes:    orig_bytes, flow.bytes_toserver, bytes_out, bytes_sent, out_bytes, bytes, length
+  duration: duration, flow.age, dur, elapsed (or flow.end minus flow.start)
+  name:     query, server_name, host, dns.rrname, tls.sni, http.hostname (for --by-name)
 Times may be epoch seconds (or ms) or ISO 8601.
 
 Reads a saved file or stdin; never touches the network.
@@ -23,6 +29,8 @@ Usage:
   beacon_detect.py conn.log
   beacon_detect.py conns.csv --min-conns 10 --allow 192.0.2.53 --allow 10.0.0.0/8
   cat events.jsonl | beacon_detect.py - --json --fail-on medium
+  beacon_detect.py eve.json --long-conn 7200
+  beacon_detect.py dns.log --by-name           # group by queried name (CDN or rotating IPs)
 """
 from __future__ import annotations
 
@@ -41,12 +49,16 @@ from typing import Dict, Iterable, List, Optional, Tuple
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 
 FIELDS = {
-    "ts": ("ts", "timestamp", "time", "start", "start_time", "first_seen", "@timestamp"),
+    "ts": ("flow.start", "ts", "timestamp", "time", "start", "start_time", "first_seen", "@timestamp"),
     "src": ("id.orig_h", "src", "src_ip", "source", "source_ip", "saddr", "client"),
     "dst": ("id.resp_h", "dst", "dst_ip", "dest", "destination", "dest_ip", "daddr", "server"),
     "dport": ("id.resp_p", "dport", "dst_port", "dest_port", "destination_port", "port"),
-    "bytes": ("orig_bytes", "bytes_out", "bytes_sent", "out_bytes", "sent_bytes", "bytes", "length"),
+    "bytes": ("orig_bytes", "flow.bytes_toserver", "bytes_out", "bytes_sent", "out_bytes", "sent_bytes", "bytes", "length"),
+    "duration": ("duration", "flow.age", "dur", "elapsed", "flow_duration"),
+    "name": ("query", "server_name", "host", "dns.rrname", "dns.queries.rrname", "tls.sni", "http.hostname",
+             "sni", "rrname", "hostname", "fqdn"),
 }
+FLOW_EVENTS = ("flow", "netflow")
 
 
 class InputError(ValueError):
@@ -92,6 +104,30 @@ def _pick(row: Dict, key: str):
     return None
 
 
+def flatten(row: Dict, prefix: str = "") -> Dict:
+    """Nested JSON (Suricata eve) to dotted keys: {"flow": {"age": 5}} -> {"flow.age": 5}.
+
+    Lists of objects use their first item (eve dns v3 keeps queries in a list).
+    """
+    out = {}
+    for k, v in row.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            v = v[0]
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def _to_float(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _to_int(v) -> Optional[int]:
     try:
         return int(float(v))
@@ -106,13 +142,22 @@ def normalize(rows: Iterable[Dict]) -> Tuple[List[Dict], int]:
         if not isinstance(row, dict):
             skipped += 1
             continue
+        if any(isinstance(v, (dict, list)) for v in row.values()):
+            row = flatten(row)
         ts = parse_time(_pick(row, "ts"))
         src, dst = _pick(row, "src"), _pick(row, "dst")
         if ts is None or src is None or dst is None:
             skipped += 1
             continue
+        duration = _to_float(_pick(row, "duration"))
+        if duration is None and row.get("flow.end") and row.get("flow.start"):
+            end = parse_time(row.get("flow.end"))
+            duration = end - ts if end is not None else None
+        name = _pick(row, "name")
         out.append({"ts": ts, "src": str(src), "dst": str(dst), "dport": _to_int(_pick(row, "dport")),
-                    "bytes": _to_int(_pick(row, "bytes"))})
+                    "bytes": _to_int(_pick(row, "bytes")), "duration": duration,
+                    "name": str(name).lower().rstrip(".") if name is not None else None,
+                    "event_type": str(row.get("event_type") or "")})
     return out, skipped
 
 
@@ -248,10 +293,37 @@ def severity_for(score: int) -> Optional[str]:
     return None
 
 
-def detect(records: List[Dict], min_conns: int = 6, allow: Optional[List] = None) -> Dict:
+def long_connections(records: List[Dict], threshold: float, allow: List) -> List[Dict]:
+    """Group connections of at least `threshold` seconds by (src, dst, port)."""
+    groups: Dict[Tuple[str, str, Optional[int]], List[float]] = defaultdict(list)
+    for r in records:
+        d = r.get("duration")
+        if d is None or d < threshold or _allowed(r["src"], allow) or _allowed(r["dst"], allow):
+            continue
+        groups[(r["src"], r["dst"], r["dport"])].append(d)
+    out = [{"src": k[0], "dst": k[1], "dport": k[2], "connections": len(v), "longest_s": round(max(v), 1),
+            "total_s": round(sum(v), 1)} for k, v in groups.items()]
+    out.sort(key=lambda c: -c["longest_s"])
+    return out
+
+
+def detect(records: List[Dict], min_conns: int = 6, allow: Optional[List] = None,
+           long_conn: float = 3600.0, by_name: bool = False) -> Dict:
     allow = allow or []
     if not records:
         raise InputError("no usable connection records (need time, source and destination)")
+    other_events = 0
+    if by_name:
+        named = [r for r in records if r.get("name")]
+        if not named:
+            raise InputError("--by-name needs a name column (query, server_name, host, dns.rrname, tls.sni)")
+        other_events = len(records) - len(named)
+        records = named
+    elif any(r.get("event_type") in FLOW_EVENTS for r in records):
+        # Suricata eve: alert, dns, tls and flow events describe the same connection; count flows only.
+        kept = [r for r in records if r.get("event_type") in FLOW_EVENTS]
+        other_events = len(records) - len(kept)
+        records = kept
     t0 = min(r["ts"] for r in records)
     t1 = max(r["ts"] for r in records)
     window = t1 - t0
@@ -261,7 +333,7 @@ def detect(records: List[Dict], min_conns: int = 6, allow: Optional[List] = None
         if _allowed(r["src"], allow) or _allowed(r["dst"], allow):
             ignored += 1
             continue
-        groups[(r["src"], r["dst"], r["dport"])].append(r)
+        groups[(r["src"], r["name"] if by_name else r["dst"], r["dport"])].append(r)
     candidates = []
     for (src, dst, port), recs in groups.items():
         if len(recs) < min_conns:
@@ -289,8 +361,24 @@ def detect(records: List[Dict], min_conns: int = 6, allow: Optional[List] = None
                     "updater, monitor or telemetry service."),
             "location": f"{c['src']} -> {target}",
         })
+    longs = long_connections(records, long_conn, allow) if long_conn > 0 else []
+    for c in longs:
+        target = f"{c['dst']}:{c['dport']}" if c["dport"] is not None else c["dst"]
+        findings.append({
+            "id": "BCN-002", "severity": "medium" if c["longest_s"] >= 8 * 3600 else "low",
+            "title": f"Long-lived connection {c['src']} -> {target}",
+            "detail": (f"{c['connections']} connection(s) of at least {long_conn:g}s, longest {c['longest_s']:g}s "
+                       f"({c['longest_s'] / 3600:.1f} h), {c['total_s'] / 3600:.1f} h in total. Interactive C2, "
+                       "tunnels and reverse shells often hold one session open instead of polling."),
+            "fix": ("Identify the process holding the session and confirm it is expected (VPN, streaming, SSH, "
+                    "WebSocket apps are normal sources). Allow-list known services with --allow."),
+            "location": f"{c['src']} -> {target}",
+        })
+    findings.sort(key=lambda f: -SEVERITY_ORDER.index(f["severity"]))
     return {"records": len(records), "ignored_by_allow": ignored, "groups": len(groups),
-            "window_s": round(window, 1), "candidates": candidates, "findings": findings}
+            "window_s": round(window, 1), "candidates": candidates, "findings": findings,
+            "long_connections": longs, "other_events_skipped": other_events,
+            "grouped_by": "name" if by_name else "destination"}
 
 
 def _iso(ts: float) -> str:
@@ -311,6 +399,12 @@ def render_text(r: Dict, fmt: str, skipped: int) -> str:
         lines.append("")
     else:
         lines.append("No group reached the minimum connection count.")
+    if r.get("long_connections"):
+        lines.append("Long-lived connections:")
+        for c in r["long_connections"][:15]:
+            port = f":{c['dport']}" if c["dport"] is not None else ""
+            lines.append(f"  {c['longest_s'] / 3600:>6.1f} h  x{c['connections']:<3} {c['src']} -> {c['dst']}{port}")
+        lines.append("")
     if not r["findings"]:
         lines.append("No beacon-like traffic found.")
     for f in r["findings"]:
@@ -328,6 +422,10 @@ def main(argv=None) -> int:
     ap.add_argument("--min-conns", type=int, default=6, help="ignore flows with fewer connections (default 6)")
     ap.add_argument("--allow", action="append", default=[],
                     help="host, IP or CIDR to ignore (repeat or comma-separate), e.g. known updaters")
+    ap.add_argument("--long-conn", type=float, default=3600.0, metavar="SECONDS",
+                    help="flag connections lasting at least this long as BCN-002 (default 3600, 0 turns it off)")
+    ap.add_argument("--by-name", action="store_true",
+                    help="group by queried or contacted name instead of destination IP (DNS, TLS SNI, HTTP host)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--fail-on", default="high", choices=SEVERITY_ORDER + ["never"],
                     help="exit 1 if any finding is at or above this severity (default: high)")
@@ -335,7 +433,7 @@ def main(argv=None) -> int:
     try:
         text = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8", errors="replace")
         records, skipped, fmt = load_records(text)
-        r = detect(records, max(3, args.min_conns), parse_allow(args.allow))
+        r = detect(records, max(3, args.min_conns), parse_allow(args.allow), args.long_conn, args.by_name)
     except (OSError, InputError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2

@@ -16,12 +16,15 @@
 
 - Commit lockfiles for applications. Review lockfile diffs in PRs: a new transitive package or a changed `resolved` URL deserves a look
 - Version ranges (`^1.2.0`, `>=1.0`) without a lockfile mean every install can pull a new release, including a compromised one
+- Cooldown: most hijacked releases in 2025 were found and pulled within hours to days. A minimum release age before adoption (Renovate `minimumReleaseAge`, Dependabot `cooldown`, pnpm `minimumReleaseAge`, uv `--exclude-newer`) keeps a fresh malicious version out of your lockfile
+- `typosquat_check.py` reads `package-lock.json` and `npm-shrinkwrap.json` and flags exact versions from its known-malicious list (TYPO-012)
 
 ## Install-time code (TYPO-010)
 
 - npm runs `preinstall`, `install` and `postinstall` of every dependency, and `prepare` for git dependencies. Most malicious npm packages act here
 - In CI: `npm ci --ignore-scripts`, then run builds for the few packages that need them (`npm rebuild <pkg>`). pnpm and newer package managers can allow-list packages that may run scripts
 - Python: building an sdist runs `setup.py` or the build backend. `pip install --only-binary :all:` refuses sdists where wheels exist
+- TYPO-011 (critical): a `preinstall` or `postinstall` that runs `setup_bun.js` or `bun_environment.js`, the Shai-Hulud 2.0 loader. Treat the machine as compromised, not just the package
 
 ## Dependency confusion (TYPO-020, TYPO-021)
 
@@ -57,6 +60,19 @@ If it is malicious and was installed anywhere:
 
 Common tricks: missing/extra/doubled letter (`reqests`, `numpyy`), swapped letters (`lodahs`), separator swaps on npm (`cross_env`), prefixes/suffixes (`python-flask`, `axios-js`), confusable Unicode, and scope impostors (`@typescript_eslint/parser` vs `@typescript-eslint/parser`).
 
+## Known compromised releases (TYPO-012)
+
+`typosquat_check.py` carries a short offline list of versions that were published by attackers. It is a quick "were we hit" check for headline incidents, not a malware feed; OSV `MAL-` ids are the full source.
+
+| Incident | Date | Packages | Source |
+|---|---|---|---|
+| chalk/debug maintainer phishing | 2025-09-08 | 18 packages incl. `chalk` 5.6.1, `debug` 4.4.2, `ansi-styles` 6.2.2, `strip-ansi` 7.1.1, `color-convert` 3.1.1, `wrap-ansi` 9.0.1 | StepSecurity, npm advisories |
+| Shai-Hulud | 2025-09-15 | started with `@ctrl/tinycolor` 4.1.1 and 4.1.2, then hundreds more | OSV MAL-2025-47141, CISA alert 2025-09-23 |
+| Shai-Hulud 2.0 | 2025-11-24 | hundreds of packages (about 800 in public counts), `setup_bun.js` preinstall | Microsoft (2025-12-09), StepSecurity |
+| ultralytics (PyPI) | 2024-12 | 8.3.41, 8.3.42, 8.3.45, 8.3.46 | PyPI blog 2024-12-11 |
+
+For worm incidents the list cannot hold every package. Search lockfiles for the hook file names and run `osv-scanner` against the lockfile.
+
 ## Vulnerability scanning
 
 - `npm audit`, `pip-audit`, `osv-scanner`, GitHub Dependabot alerts
@@ -74,6 +90,8 @@ Common tricks: missing/extra/doubled letter (`reqests`, `numpyy`), swapped lette
 
 ## Maintainer account hygiene
 
-- 2FA on registry and GitHub accounts, hardware keys for maintainers of widely used packages
-- Granular, short-lived publish tokens scoped to one package; prefer CI trusted publishing over tokens on laptops
+- 2FA on registry and GitHub accounts, hardware keys (WebAuthn) for maintainers of widely used packages. The 2025 chalk/debug compromise started with a phishing mail from a look-alike `npmjs.help` domain that captured a TOTP code
+- npm changed tokens in late 2025: classic tokens can no longer be created (2025-11-05) and were revoked (changelog 2025-12-09); granular tokens with write access default to 7 days and max out at 90. Any CI that still uses an `NPM_TOKEN` secret needs a granular token or, better, trusted publishing
+- Trusted publishing (OIDC from GitHub Actions or GitLab CI) exists on both npm and PyPI: no long-lived token to steal, and provenance comes for free
+- Review who has publish rights at least yearly
 - Review who has publish rights at least yearly

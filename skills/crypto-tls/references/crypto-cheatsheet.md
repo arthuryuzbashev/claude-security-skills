@@ -10,25 +10,32 @@ Use it to turn `crypto_review.py` findings into code fixes. Default rule: use a 
 | MD5 / SHA-1 for integrity or signatures | SHA-256 / SHA-512; HMAC-SHA256 when a key is involved | CRY-002/003 |
 | AES-ECB | AES-GCM or ChaCha20-Poly1305 (authenticated encryption) | CRY-010 |
 | Fixed / zero IV, reused nonce | Fresh random nonce per message, stored next to the ciphertext | CRY-011 |
+| RSA encryption with PKCS#1 v1.5 or no padding | RSA-OAEP with SHA-256, or HPKE / ECDH + AES-GCM | CRY-012 |
 | Key in source | Secret manager, KMS, or env injected at deploy; rotate the leaked one | CRY-020/021 |
 | `Math.random`, `random`, `rand()`, `java.util.Random` for tokens | OS CSPRNG (table below) | CRY-030 |
 | DES, RC4, RC2 | AES-256-GCM | CRY-040 |
 | 3DES, Blowfish | AES-GCM | CRY-041 |
 | RSA/DSA/DH < 2048 bits | RSA-3072, or ECDSA P-256 / Ed25519 / X25519 | CRY-050 |
+| PBKDF2 under the OWASP iteration count | Raise the count (table below) and rehash on login, or move to argon2id | CRY-051 |
+| bcrypt cost under 10 | Cost 12 (10 at the least), rehash on login | CRY-052 |
 | `verify=False`, `rejectUnauthorized: false`, `InsecureSkipVerify` | Keep verification; pass the private CA bundle | CRY-060 |
+| `PROTOCOL_TLSv1`, `minVersion: 'TLSv1'`, `VersionTLS10`, `ssl_protocols TLSv1` | Library default context with minimum TLS 1.2 | CRY-061 |
 | JWT `alg: none`, verification off | Pin algorithms on verify, check `exp`, `iss`, `aud` | CRY-070/071 |
 
 ## Password hashing parameters
 
-Minimums from the OWASP Password Storage Cheat Sheet. Tune upward until a login takes about 100-500 ms on your hardware.
+Minimums from the OWASP Password Storage Cheat Sheet (checked 2026-11-19). Tune upward until a login takes about 100-500 ms on your hardware. argon2id has equivalent trade-off settings (for example m = 46 MiB, t = 1); the row below is the lowest one.
 
 | Algorithm | Minimum |
 |---|---|
 | argon2id | m = 19 MiB (19456 KiB), t = 2, p = 1 |
 | scrypt | N = 2^17, r = 8, p = 1 |
 | bcrypt | cost 10 or more; input is truncated at 72 bytes |
+| PBKDF2-HMAC-SHA1 | 1,400,000 iterations |
 | PBKDF2-HMAC-SHA256 | 600,000 iterations |
-| PBKDF2-HMAC-SHA512 | 210,000 iterations |
+| PBKDF2-HMAC-SHA512 | 220,000 iterations |
+
+bcrypt's 72-byte limit: pre-hashing (HMAC-SHA256/384, then base64) removes it, as Django's `bcrypt_sha256` and WordPress 6.8 (`$wp$2y$...`, HMAC-SHA384) do. Base64 the digest first so a zero byte cannot cut the input short.
 
 Migrating from a weak hash: on the next successful login, verify against the old hash, then store the new one. For accounts that never log in, wrap the old hash (`argon2id(md5_hash)`) and flag it, so nothing stays as bare MD5.
 
@@ -55,6 +62,12 @@ Tokens: at least 128 bits of entropy (16 random bytes), single-use where they gr
 - Rotate the key before about 2^32 messages when nonces are random
 - Store `nonce || ciphertext || tag`. Nonces are not secret
 - Encrypt-then-MAC if you are stuck with CBC; better, move to GCM
+
+## RSA padding
+
+- Encryption: OAEP with SHA-256 (`padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)`, Java `RSA/ECB/OAEPWithSHA-256AndMGF1Padding`, Node `RSA_PKCS1_OAEP_PADDING` with `oaepHash: "sha256"`, Go `rsa.EncryptOAEP`, .NET `RSAEncryptionPadding.OaepSHA256`). PKCS#1 v1.5 decryption is a padding oracle waiting to happen (Bleichenbacher 1998, ROBOT 2017, Marvin 2023 timing). Java's `RSA/ECB/...` name has no ECB in it; the middle part is a label
+- Signatures: PKCS#1 v1.5 signing (`RS256`) is still fine; PSS (`PS256`) is the modern choice. CRY-012 only looks at encryption calls
+- New designs: skip RSA encryption, use HPKE (RFC 9180) or ECDH (X25519) + HKDF + AES-GCM
 
 ## Keys
 
@@ -99,4 +112,10 @@ tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 | `$2a$`/`$2b$`/`$2y$` + cost | bcrypt | Yes, cost 10+ |
 | `$argon2id$v=19$m=..,t=..,p=..` | argon2id | Yes, check params |
 | `$scrypt$` or `$7$` | scrypt | Yes |
-| `pbkdf2_sha256$iterations$...` | Django PBKDF2 | Yes at 600k+ iterations |
+| `pbkdf2_sha256$iterations$...` | Django PBKDF2 | Yes at 600k+ iterations (1.4M for `pbkdf2_sha1`) |
+| `bcrypt_sha256$$2b$...`, `argon2$argon2id$...` | Django wrappers, identified by the inner hash | Same as the inner hash |
+| `$P$` / `$H$` + 31 chars | phpass (WordPress before 6.8, phpBB): iterated MD5 | No, rehash on login |
+| `$wp$2y$10$...` | WordPress 6.8+ bcrypt over HMAC-SHA384 | Yes |
+| `$S$` + 52 chars | Drupal 7: iterated SHA-512 | Acceptable, prefer bcrypt/argon2id |
+| `{SHA}`, `{SSHA}`, `{SSHA512}`, `{MD5}` | LDAP userPassword: one round of a fast hash | No |
+| `{CRYPT}$...` | LDAP wrapper around crypt(3), identified by the inner hash | Same as the inner hash |
