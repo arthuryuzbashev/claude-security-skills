@@ -1,0 +1,15 @@
+{"@timestamp": "2026-11-19T11:00:00Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "svc_backup"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:04Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "jdoe"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:08Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "administrator"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:12Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "svc_backup"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:16Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "jdoe"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:20Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "administrator"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:24Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "svc_backup"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:28Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "jdoe"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:32Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "administrator"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:36Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "svc_backup"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:40Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "jdoe"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:44Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "administrator"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:00:50Z", "event": {"outcome": "success", "category": "authentication"}, "source": {"ip": "203.0.113.120"}, "user": {"name": "svc_backup"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:30:00Z", "event": {"outcome": "success", "category": "authentication"}, "source": {"ip": "198.51.100.30"}, "user": {"name": "msmith"}, "service": "vpn"}
+{"@timestamp": "2026-11-19T11:31:00Z", "event": {"outcome": "failure", "category": "authentication"}, "source": {"ip": "198.51.100.30"}, "user": {"name": "msmith"}, "service": "vpn"}

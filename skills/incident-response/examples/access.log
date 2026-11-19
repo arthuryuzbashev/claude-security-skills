@@ -1,0 +1,4 @@
+203.0.113.45 - - [04/Mar/2026:09:51:12 +0000] "GET /wp-login.php HTTP/1.1" 200 4521 "-" "python-requests/2.31.0"
+203.0.113.45 - - [04/Mar/2026:09:51:14 +0000] "POST /wp-login.php HTTP/1.1" 302 0 "-" "python-requests/2.31.0"
+203.0.113.45 - - [04/Mar/2026:10:07:44 +0000] "POST /wp-content/uploads/2026/03/img.php HTTP/1.1" 200 38 "-" "python-requests/2.31.0"
+192.0.2.10 - - [04/Mar/2026:10:08:00 +0000] "GET / HTTP/1.1" 200 18233 "-" "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4)"

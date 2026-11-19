@@ -1,0 +1,6 @@
+	disabled services = {
+		"com.apple.ftpd" => disabled
+		"com.apple.screensharing" => enabled
+		"com.openssh.sshd" => enabled
+		"com.apple.smbd" => enabled
+	}

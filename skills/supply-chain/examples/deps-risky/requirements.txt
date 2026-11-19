@@ -1,0 +1,9 @@
+# App dependencies (example only, contains deliberate look-alikes)
+--extra-index-url https://pypi.internal.example.test/simple
+requests==2.32.3
+reqeusts==2.28.1
+numpyy>=1.26
+python-flask==3.0.3
+beautifulsoup4==4.12.3
+acme-billing-client==1.4.0
+Django==5.0.6

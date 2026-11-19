@@ -1,0 +1,4 @@
+	disabled services = {
+		"com.apple.ftpd" => disabled
+		"com.apple.screensharing" => disabled
+	}

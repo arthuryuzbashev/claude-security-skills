@@ -1,0 +1,5 @@
+version: STSv1
+mode: enforce
+mx: mx1.strong.example.test
+mx: *.mail.strong.example.test
+max_age: 1209600

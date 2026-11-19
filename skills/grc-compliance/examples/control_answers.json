@@ -1,0 +1,7 @@
+{
+  "mfa": {"answer": "yes", "note": "passkeys for everyone since 2026-06"},
+  "backups": {"answer": "yes", "note": "immutable copy, restore tested 2026-09"},
+  "vuln_management": "partial",
+  "ir_plan": "no",
+  "CTL-02": "yes"
+}

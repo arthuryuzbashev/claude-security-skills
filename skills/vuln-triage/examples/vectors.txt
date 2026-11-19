@@ -1,0 +1,7 @@
+# one vector per line, anything after the vector is a note
+CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H              unauthenticated RCE
+CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H              RCE that escapes its sandbox
+CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N              reflected XSS
+CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H              local privilege escalation
+CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:P/RL:O/RC:C   RCE with a patch and a public PoC
+CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/CR:L/IR:L/AR:L/MAV:A   same RCE on an internal low-value host

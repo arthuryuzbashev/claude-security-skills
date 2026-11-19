@@ -1,0 +1,14 @@
+services:
+  app:
+    image: registry.example.test/app:latest
+    privileged: true
+    network_mode: host
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=fake-jwt-secret-for-demo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  db:
+    image: postgres:16.2
+    environment:
+      POSTGRES_PASSWORD: example-not-real

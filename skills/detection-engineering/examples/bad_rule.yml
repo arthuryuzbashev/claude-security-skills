@@ -1,0 +1,18 @@
+# Deliberately broken rule for sigma_lint.py practice. Every problem is on purpose.
+title: Suspicious whoami
+id: 1234
+status: production
+tags:
+  - attack.T1033
+  - attack.discovery
+  - discovery
+logsource:
+  product: windows
+date: 2026/11/19
+detection:
+  selection:
+    Image|endwith: '\whoami.exe'
+  filter:
+    User: 'NT AUTHORITY\SYSTEM'
+  condition: selection and not filters
+level: severe

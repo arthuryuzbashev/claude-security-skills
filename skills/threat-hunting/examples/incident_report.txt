@@ -1,0 +1,24 @@
+INCIDENT NOTE IR-2026-114 (fake data for testing, all indicators are made up)
+
+Summary: user j.doe@corp.example.test opened invoice_8841.docm from an email sent by
+billing@payments-portal[.]example.test. The macro ran PowerShell with -EncodedCommand and
+pulled a second stage from hxxps://cdn-update[.]example[.]test/static/upd.bin?id=77&token=sk_live_FAKEFAKE1234
+then beaconed over HTTPS to 203.0.113.45 and 198.51.100[.]23 every 60 seconds.
+
+Host artefacts:
+- Dropped C:\Users\j.doe\AppData\Roaming\Updater\updsvc.exe
+- Persistence: HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Updater
+- Scheduled task "UpdaterCheck" created with schtasks /create /sc minute /mo 30
+- LSASS dumped with rundll32 comsvcs.dll MiniDump to %TEMP%\lsass.dmp
+- Linux jump box: dropped /tmp/.x/kworkerd and added a key to /root/.ssh/authorized_keys
+
+Hashes:
+  updsvc.exe  SHA256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  invoice_8841.docm  MD5 5d41402abc4b2a76b9719d911017c592
+  kworkerd  SHA1 aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
+
+Exploited on the VPN appliance: CVE-2023-46805 and cve-2024-21887.
+Internal hosts seen (not IOCs): 10.20.30.40, 192.168.1.15, 127.0.0.1
+IPv6 C2 fallback: 2001:db8:85a3::8a2e:370:7334
+Benign noise: https://www.microsoft.com/en-us/security and schemas.microsoft.com
+Reference: https://attack.mitre.org/techniques/T1059/001/

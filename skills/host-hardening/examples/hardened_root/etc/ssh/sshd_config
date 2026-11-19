@@ -1,0 +1,9 @@
+# Fictional hardened bastion (bastion.example.test)
+Include /etc/ssh/sshd_config.d/*.conf
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+X11Forwarding no
+MaxAuthTries 3
+AllowGroups ssh-users

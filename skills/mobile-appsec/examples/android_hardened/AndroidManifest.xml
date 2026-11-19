@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fictional app for testing. Not a real package. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="test.example.safewallet">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <permission android:name="test.example.safewallet.permission.SYNC"
+        android:protectionLevel="signature" />
+
+    <application
+        android:label="Safe Wallet"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".PayLinkActivity" android:exported="true">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="pay.example.test" />
+            </intent-filter>
+        </activity>
+
+        <service android:name=".SyncService" android:exported="true"
+            android:permission="test.example.safewallet.permission.SYNC" />
+
+        <receiver android:name=".BootReceiver" android:exported="false" />
+
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="test.example.safewallet.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

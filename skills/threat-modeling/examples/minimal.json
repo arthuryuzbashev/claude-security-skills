@@ -1,0 +1,10 @@
+{
+  "name": "Internal reporting job",
+  "components": [
+    {"id": "job", "type": "service", "zone": "internal", "logging": true},
+    {"id": "warehouse", "type": "db", "zone": "internal", "logging": true}
+  ],
+  "flows": [
+    {"from": "job", "to": "warehouse", "protocol": "postgres+tls", "auth": "iam", "data": "internal"}
+  ]
+}

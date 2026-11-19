@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      hostNetwork: true
+      containers:
+        - name: web
+          image: registry.example.test/web:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: API_TOKEN
+              value: "tok_FAKE_0123456789abcdef"   # example only
+          securityContext:
+            privileged: true
+            runAsUser: 0
+        - name: sidecar
+          image: busybox
+          command: ["sh", "-c", "tail -f /host/var/log/syslog"]
+          volumeMounts:
+            - name: host-logs
+              mountPath: /host/var/log
+      volumes:
+        - name: host-logs
+          hostPath:
+            path: /var/log
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080

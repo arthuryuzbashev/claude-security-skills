@@ -1,0 +1,7 @@
+{
+    AutomaticCheckEnabled = 1;
+    AutomaticDownload = 0;
+    ConfigDataInstall = 1;
+    CriticalUpdateInstall = 0;
+    LastSuccessfulDate = "2026-01-05 09:12:44 +0000";
+}

@@ -1,0 +1,14 @@
+{
+  "name": "example-shop-web",
+  "version": "1.4.0",
+  "private": true,
+  "dependencies": {
+    "express": "^4.17.1",
+    "lodash": "4.17.20",
+    "left-pad-ng": "*",
+    "theme-kit": "github:example-test/theme-kit"
+  },
+  "devDependencies": {
+    "mocha": "~9.1.0"
+  }
+}

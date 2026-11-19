@@ -1,0 +1,7 @@
+TimeCreated,Id,Computer,Message
+3/4/2026 10:20:15 AM,4624,FS01.corp.example.test,"An account was successfully logged on. Account: deploy, Logon Type: 3, Source: 192.0.2.80"
+3/4/2026 10:21:02 AM,4672,FS01.corp.example.test,"Special privileges assigned to new logon. Account: deploy"
+3/4/2026 10:24:47 AM,4698,FS01.corp.example.test,"A scheduled task was created. Task Name: \Microsoft\Windows\UpdateCheck"
+3/4/2026 10:31:10 AM,4720,FS01.corp.example.test,"A user account was created. New Account: svc_backup2"
+3/4/2026 10:31:12 AM,4732,FS01.corp.example.test,"A member was added to a security-enabled local group. Group: Administrators, Member: svc_backup2"
+3/4/2026 12:02:55 PM,1102,FS01.corp.example.test,"The audit log was cleared. Account: deploy"

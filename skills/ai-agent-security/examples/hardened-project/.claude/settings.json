@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git diff:*)",
+      "Bash(git status)",
+      "WebFetch(domain:docs.example.test)"
+    ],
+    "ask": [
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  },
+  "enabledMcpjsonServers": ["github"],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "./scripts/format-changed.sh" }
+        ]
+      }
+    ]
+  }
+}

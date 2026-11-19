@@ -1,0 +1,17 @@
+# subdomains of example.test gathered from DNS and an asset sheet (fake)
+www.example.test
+example.test
+WWW.example.test.
+api.example.test
+jenkins.example.test
+staging-api.example.test
+dev2.example.test
+admin.example.test
+old-shop.example.test
+grafana.int.example.test
+vpn.example.test
+docs.example.test
+assets.example.test
+https://login.example.test/path
+not a host name
+partner.other.test

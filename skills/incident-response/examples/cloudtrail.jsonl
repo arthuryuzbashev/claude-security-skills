@@ -1,0 +1,3 @@
+{"eventTime":"2026-03-04T10:40:03Z","eventName":"ConsoleLogin","sourceIPAddress":"203.0.113.45","userIdentity":{"type":"IAMUser","userName":"deploy"},"responseElements":{"ConsoleLogin":"Success"},"additionalEventData":{"MFAUsed":"No"}}
+{"eventTime":"2026-03-04T10:42:19Z","eventName":"CreateAccessKey","sourceIPAddress":"203.0.113.45","userIdentity":{"type":"IAMUser","userName":"deploy"},"requestParameters":{"userName":"deploy"}}
+{"eventTime":"2026-03-04T10:55:47Z","eventName":"GetObject","sourceIPAddress":"203.0.113.45","userIdentity":{"type":"IAMUser","userName":"deploy"},"requestParameters":{"bucketName":"backups.example.test","key":"db/customers-2026-03-01.sql.gz"}}

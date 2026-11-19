@@ -1,0 +1,20 @@
+{
+  "name": "example-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lodash": "^4.17.21",
+    "@acme/ui-kit": "^2.1.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.0"
+  }
+}

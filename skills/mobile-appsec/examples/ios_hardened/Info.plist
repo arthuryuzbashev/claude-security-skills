@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>test.example.safewallet</string>
+	<key>MinimumOSVersion</key>
+	<string>16.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<false/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>The camera scans payment QR codes. Photos are not stored.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Face ID unlocks the wallet instead of your passcode.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>mailto</string>
+	</array>
+</dict>
+</plist>

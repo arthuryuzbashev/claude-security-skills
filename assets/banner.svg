@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="Aegis: security skills for Claude Code">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#14213d"/>
+    </linearGradient>
+    <linearGradient id="sh" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.04"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="300" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="300" rx="24" fill="url(#grid)"/>
+  <g transform="translate(110 55)">
+    <path d="M95 0 L190 32 V105 C190 160 150 200 95 220 C40 200 0 160 0 105 V32 Z" fill="url(#sh)"/>
+    <path d="M95 22 L170 47 V105 C170 148 139 180 95 197 C51 180 20 148 20 105 V47 Z" fill="#0b1020" fill-opacity="0.35"/>
+    <path d="M58 108 L85 135 L136 82" fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="360" y="140" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="84" font-weight="800" fill="#ffffff" letter-spacing="2">Aegis</text>
+  <text x="364" y="190" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="28" fill="#cbd5e1">Security skills for Claude Code</text>
+  <text x="364" y="232" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#7dd3fc">19 skills · 38 tested tools · zero dependencies</text>
+</svg>

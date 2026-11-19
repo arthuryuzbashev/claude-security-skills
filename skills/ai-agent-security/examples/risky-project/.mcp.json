@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@example-mcp/github-server"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_FAKEexample000000000000000000000000"
+      }
+    },
+    "files": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--privileged", "-v", "/:/host", "example.test/mcp-files:latest"]
+    },
+    "search": {
+      "type": "http",
+      "url": "http://198.51.100.20:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer FAKEtoken1234567890abcdef"
+      }
+    },
+    "py-tools": {
+      "command": "uvx",
+      "args": ["example-mcp-tools"]
+    }
+  }
+}

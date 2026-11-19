@@ -1,0 +1,7 @@
+[
+  {"issuer_name": "C=US, O=Example CA, CN=Example R3", "common_name": "example.test", "name_value": "example.test\nwww.example.test", "id": 1001},
+  {"issuer_name": "C=US, O=Example CA, CN=Example R3", "common_name": "*.example.test", "name_value": "*.example.test", "id": 1002},
+  {"issuer_name": "C=US, O=Example CA, CN=Example R3", "common_name": "mongo-backup.example.test", "name_value": "mongo-backup.example.test", "id": 1003},
+  {"issuer_name": "C=US, O=Example CA, CN=Example R3", "common_name": "uat.example.test", "name_value": "uat.example.test\nuat-admin.example.test", "id": 1004},
+  {"issuer_name": "C=US, O=Example CA, CN=Example R3", "common_name": "gitlab.example.test", "name_value": "gitlab.example.test", "id": 1005}
+]

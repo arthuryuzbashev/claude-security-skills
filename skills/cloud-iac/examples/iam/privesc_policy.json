@@ -1,0 +1,40 @@
+{
+  "PolicyVersion": {
+    "Document": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DeployLambdas",
+          "Effect": "Allow",
+          "Action": [
+            "lambda:CreateFunction",
+            "lambda:InvokeFunction",
+            "lambda:UpdateFunctionConfiguration",
+            "iam:PassRole"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "ManagePolicies",
+          "Effect": "Allow",
+          "Action": ["iam:CreatePolicyVersion", "iam:ListPolicies"],
+          "Resource": "arn:aws:iam::123456789012:policy/app-*"
+        },
+        {
+          "Sid": "Everything3",
+          "Effect": "Allow",
+          "Action": "s3:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "ReadSecrets",
+          "Effect": "Allow",
+          "Action": "secretsmanager:GetSecretValue",
+          "Resource": "*"
+        }
+      ]
+    },
+    "VersionId": "v3",
+    "IsDefaultVersion": true
+  }
+}

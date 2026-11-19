@@ -1,0 +1,10 @@
+{
+  "name": "aegis",
+  "version": "1.0.0",
+  "description": "Security skills for Claude Code: web, cloud, supply chain, AI agents, detection, incident response, forensics, GRC and more. Every skill ships tested stdlib-only Python tools.",
+  "author": { "name": "Arthur Yuzbashev" },
+  "homepage": "https://github.com/arthuryuzbashev/aegis-skills",
+  "repository": "https://github.com/arthuryuzbashev/aegis-skills",
+  "license": "MIT",
+  "keywords": ["security", "appsec", "devsecops", "blue-team", "dfir", "threat-hunting", "cloud-security", "ai-security", "skills"]
+}

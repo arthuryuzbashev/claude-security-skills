@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@example-mcp/github-server@1.4.2"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "search": {
+      "type": "http",
+      "url": "https://mcp.example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SEARCH_API_TOKEN}"
+      }
+    },
+    "local-notes": {
+      "type": "http",
+      "url": "http://127.0.0.1:7410/mcp"
+    }
+  }
+}

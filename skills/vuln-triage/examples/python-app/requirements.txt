@@ -1,0 +1,10 @@
+# fake service, pins chosen to show every check
+flask==2.0.1
+requests==2.19.1
+pyyaml==5.3.1  # config loader
+jinja2>=3.0
+urllib3
+gunicorn==20.1.0 \
+    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000
+internal-utils @ git+https://git.example.test/team/internal-utils.git@main
+-r requirements-dev.txt

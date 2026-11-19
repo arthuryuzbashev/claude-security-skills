@@ -1,0 +1,10 @@
+; saved `dig` answers for some hosts in hosts.txt (fake data)
+www.example.test.            300 IN A      203.0.113.10
+example.test.                300 IN A      203.0.113.10
+api.example.test.            300 IN A      203.0.113.20
+jenkins.example.test.        300 IN A      10.20.0.15
+staging-api.example.test.    300 IN CNAME  example-staging.herokuapp.com.
+old-shop.example.test.       300 IN CNAME  shop-legacy.example-partner.test.
+docs.example.test.           300 IN CNAME  example-docs.github.io.
+example-docs.github.io.      300 IN A      198.51.100.40
+dev2.example.test.           300 IN A      127.0.0.1

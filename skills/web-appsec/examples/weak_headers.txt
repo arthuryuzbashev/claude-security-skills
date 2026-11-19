@@ -1,0 +1,12 @@
+HTTP/1.1 301 Moved Permanently
+Location: https://shop.example.test/
+
+HTTP/2 200
+server: nginx/1.18.0
+x-powered-by: PHP/7.4.3
+content-type: text/html; charset=UTF-8
+content-security-policy: default-src 'self'; script-src 'self' 'unsafe-inline' https:
+access-control-allow-origin: *
+access-control-allow-credentials: true
+set-cookie: PHPSESSID=9f2c1b; path=/
+set-cookie: theme=dark; Path=/; Secure; SameSite=Lax

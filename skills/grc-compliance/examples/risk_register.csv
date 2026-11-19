@@ -1,0 +1,9 @@
+id,title,category,owner,likelihood,impact,control_effectiveness,controls,residual_likelihood,residual_impact,treatment,last_review,next_review,status
+R-001,Ransomware encrypts file servers and backups,Cyber,Head of IT,4,5,weak,EDR on servers; nightly backups (not immutable),,,mitigate,2026-03-02,2026-09-01,open
+R-002,Phishing leads to email account takeover,Cyber,CISO,4,4,strong,MFA on email; awareness training; mail filtering,,,mitigate,2026-10-01,2027-01-01,open
+R-003,Key SaaS vendor (payroll) suffers a breach,Third party,,3,4,weak,Annual vendor questionnaire,,,,2025-11-10,,open
+R-004,Former employee keeps access to cloud console,Access,IT Ops Lead,3,4,none,,,,accept,2026-06-15,2026-12-15,open
+R-005,Laptop theft exposes customer data,Physical,IT Ops Lead,3,3,strong,Full disk encryption; MDM remote wipe,,,mitigate,2026-08-20,2027-02-20,open
+R-006,Public storage bucket leaks exports,Cloud,Platform Lead,3,5,,Bucket policy review,2,5,mitigate,2026-07-01,2026-10-01,open
+R-007,Data centre fire at colocation site,Continuity,COO,1,5,partial,Offsite backups; DR runbook,,,transfer,2026-05-05,2027-05-05,open
+R-008,Legacy FTP server exposed to the internet,Cyber,Head of IT,4,3,,,,,,,,closed

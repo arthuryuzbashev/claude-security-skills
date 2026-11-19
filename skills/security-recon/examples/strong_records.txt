@@ -1,0 +1,7 @@
+; dig-style TXT answers saved for strong.example.test (fake domain, fake records)
+strong.example.test.               300 IN TXT "v=spf1 include:_spf.strong.example.test -all"
+_spf.strong.example.test.          300 IN TXT "v=spf1 ip4:192.0.2.0/24 ip4:203.0.113.10 ip6:2001:db8::/32 -all"
+_dmarc.strong.example.test.        300 IN TXT "v=DMARC1; p=reject; rua=mailto:dmarc@strong.example.test; adkim=s; aspf=s"
+s1._domainkey.strong.example.test. 300 IN TXT "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzYN5WLD4uAe6FLuhtdWZzgT5Ikr9CpHbIPrmmchbKpXMEPadzZ+bHY4v1aBJn3uA5lDcWmeb9evaCoNYU8Xz1KyBitIf3es6uEJwsf0U5XT30cZSr/dUIaWZJBJxn0/tAQtmK6FYyc1IDCqkmf3OuXsh2wv4" "Il6UmvcKOQd2Dir7XRnOJt7iDoY51MbXoX+guWVyXlV4XB8S7cBYefOPZGlu+oENSd6oSsH8RY4GIKJFsE9b0vcQSjXHMguhap2CoZ5rvPZm1gseWRRZ4kkxmSDcADcLG14WVs2o5Q8jOjknClZpiKU5d9v0lbltSbnaonKLET290smCzvboNByp2wIDAQAB"
+_mta-sts.strong.example.test.      300 IN TXT "v=STSv1; id=20260101T000000"
+_smtp._tls.strong.example.test.    300 IN TXT "v=TLSRPTv1; rua=mailto:tls-reports@strong.example.test"

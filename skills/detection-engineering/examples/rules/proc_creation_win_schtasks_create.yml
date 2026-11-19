@@ -1,0 +1,30 @@
+title: Scheduled Task Created From a User-Writable Path
+id: b78bcfc4-227d-4c3e-8c0a-77d6beb2a51a
+status: experimental
+description: Detects schtasks.exe /create where the task runs something from a user-writable folder (AppData, Temp, Public, ProgramData), a common persistence pattern.
+author: Aegis example
+date: 2026-11-19
+tags:
+  - attack.persistence
+  - attack.execution
+  - attack.t1053.005
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains: '/create'
+  paths:
+    CommandLine|contains:
+      - '\AppData\'
+      - '\Temp\'
+      - '\Users\Public\'
+      - '\ProgramData\'
+  filter_system:
+    User|startswith:
+      - 'NT AUTHORITY\SYSTEM'
+  condition: selection and paths and not filter_system
+falsepositives:
+  - Software updaters that install per-user tasks under AppData (Teams, Zoom and similar); baseline them by task name
+level: medium

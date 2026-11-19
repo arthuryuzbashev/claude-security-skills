@@ -1,0 +1,37 @@
+title: PowerShell Started With an Encoded Command
+id: 51a9a2f5-703a-45cc-becc-9f41f04c9c1c
+status: experimental
+description: |
+  Detects powershell.exe or pwsh.exe started with -EncodedCommand (or a short
+  form of it). Attackers use base64 commands to hide what a script does from
+  command-line logging and casual review.
+author: Aegis example
+date: 2026-11-19
+tags:
+  - attack.execution
+  - attack.t1059.001
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_img:
+    - Image|endswith:
+        - '\powershell.exe'
+        - '\pwsh.exe'
+    - OriginalFileName:
+        - 'PowerShell.EXE'
+        - 'pwsh.dll'
+  selection_flag:
+    CommandLine|contains:
+      - ' -enc '
+      - ' -enco'
+      - ' -ec '
+      - ' -encodedcommand '
+  filter_sccm:
+    ParentImage|endswith: '\CCM\CcmExec.exe'
+  condition: all of selection_* and not filter_sccm
+falsepositives:
+  - Management agents and installers that wrap scripts in base64 (check the parent process)
+level: high

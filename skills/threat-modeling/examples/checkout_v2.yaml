@@ -1,0 +1,100 @@
+# v2 adds an LLM support bot, an order events queue and a partner webhook
+name: Shop checkout v2
+zones:
+  internet: 0
+  dmz: 1
+  app: 2
+  data: 3
+  third-party: 0
+components:
+  - id: shopper
+    name: Shopper
+    type: user
+    zone: internet
+  - id: web
+    name: Storefront (shop.example.test)
+    type: web
+    zone: dmz
+    logging: yes
+  - id: api
+    name: Orders API
+    type: api
+    zone: app
+    logging: yes
+  - id: db
+    name: Orders DB
+    type: db
+    zone: data
+    logging: yes
+  - id: psp
+    name: Payment provider
+    type: external
+    zone: third-party
+  - id: bot
+    name: Support assistant
+    type: llm
+    zone: app
+    logging: no
+  - id: events
+    name: Order events queue
+    type: queue
+    zone: app
+  - id: carrier
+    name: Carrier webhook (hooks.example.test)
+    type: external
+    zone: third-party
+flows:
+  - id: browse
+    from: shopper
+    to: web
+    protocol: https
+    auth: none
+    data: public
+  - id: checkout
+    from: shopper
+    to: web
+    protocol: https
+    auth: session
+    data: [pii, payment]
+  - id: web-api
+    from: web
+    to: api
+    protocol: https
+    auth: mtls
+    data: pii
+  - id: api-db
+    from: api
+    to: db
+    protocol: postgres
+    auth: password
+    data: pii
+  - id: pay
+    from: api
+    to: psp
+    protocol: https
+    auth: apikey
+    data: payment
+  - id: chat
+    from: shopper
+    to: bot
+    protocol: https
+    auth: none
+    data: pii
+  - id: bot-api
+    from: bot
+    to: api
+    protocol: https
+    auth: apikey
+    data: pii
+  - id: order-events
+    from: api
+    to: events
+    protocol: amqp
+    auth: password
+    data: pii
+  - id: tracking
+    from: carrier
+    to: api
+    protocol: http
+    auth: none
+    data: personal
